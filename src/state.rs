@@ -128,6 +128,33 @@ pub enum UiCmd {
 
 pub type ScanRef = Arc<Mutex<ScanCtl>>;
 
+/// Heal relic timers, in scoreboard order: blue inner, blue outer, red outer, red inner.
+/// Times are game-clock seconds; `game_time` + `at` let anyone extrapolate "now".
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RelicClock {
+    pub active: bool,
+    pub ready_at: [f64; 4],
+    pub game_time: f64,
+    pub at: Option<std::time::Instant>,
+    pub my_side_blue: Option<bool>,
+    /// When a slot was last marked by hotkey (for press-again-to-undo).
+    pub marked: [Option<std::time::Instant>; 4],
+    pub before_mark: [f64; 4],
+}
+
+impl RelicClock {
+    pub fn now(&self) -> f64 {
+        self.game_time + self.at.map(|a| a.elapsed().as_secs_f64()).unwrap_or(0.0)
+    }
+
+    pub fn start(&mut self, first_outer: f64, first_inner: f64) {
+        *self = RelicClock { active: true, ready_at: [first_inner, first_outer, first_outer, first_inner], ..*self };
+        self.marked = [None; 4];
+    }
+}
+
+pub type RelicRef = Arc<Mutex<RelicClock>>;
+
 /// JSON has no NaN ("no data"): send it as null.
 mod nan_as_null {
     use serde::{Deserialize, Deserializer, Serializer};

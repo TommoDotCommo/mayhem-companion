@@ -25,6 +25,7 @@ pub struct Engine {
     data: Arc<Data>,
     shared: SharedRef,
     scan: ScanRef,
+    relics: RelicRef,
     overlay: OverlayHandle,
     lcu: Option<Lcu>,
     phase: String,
@@ -46,12 +47,13 @@ fn u32_of(v: &Value) -> u32 {
 }
 
 impl Engine {
-    pub fn new(cfg: Config, data: Arc<Data>, shared: SharedRef, scan: ScanRef, overlay: OverlayHandle) -> Engine {
+    pub fn new(cfg: Config, data: Arc<Data>, shared: SharedRef, scan: ScanRef, relics: RelicRef, overlay: OverlayHandle) -> Engine {
         Engine {
             cfg,
             data,
             shared,
             scan,
+            relics,
             overlay,
             lcu: None,
             phase: String::new(),
@@ -383,6 +385,7 @@ impl Engine {
             c.max_round = 1;
             c.build = BuildProfile::default();
         }
+        self.relics.lock().unwrap().active = false;
         self.game_champ = None;
         self.build = None;
         self.level = 0;
@@ -417,6 +420,17 @@ impl Engine {
         let dead = me["isDead"].as_bool().unwrap_or(false);
         let items: Vec<u32> = me["items"].as_array().map(|a| a.iter().map(|i| u32_of(&i["itemID"])).collect()).unwrap_or_default();
         let game_time = v["gameData"]["gameTime"].as_f64().unwrap_or(0.0);
+        if self.cfg.relic_timers {
+            let mut r = self.relics.lock().unwrap();
+            // new game (or the clock jumped back): first spawns at 1:45 outer / 2:30 inner
+            if !r.active || game_time + 5.0 < r.game_time {
+                r.start(self.cfg.relic_first_outer, self.cfg.relic_first_inner);
+                log::info!("relic timers started at {game_time:.0}s");
+            }
+            r.game_time = game_time;
+            r.at = Some(Instant::now());
+            r.my_side_blue = me["team"].as_str().map(|t| t == "ORDER");
+        }
 
         if self.game_champ.is_none() {
             let from_cs = self.imported;
@@ -534,6 +548,15 @@ impl Engine {
         self.shared.write().unwrap().game =
             Some(GameState { champ: Some(cid), level: 11, round, dead: true, build: build.labels(&meta), build_expected: true });
         self.overlay.send(OverlayCmd::PanelVisible(Some(true)));
+        {
+            // demo relics: one up, one about to spawn, two counting down
+            let mut r = self.relics.lock().unwrap();
+            r.start(105.0, 150.0);
+            r.game_time = 600.0;
+            r.at = Some(Instant::now());
+            r.ready_at = [600.0 + 47.0, 590.0, 600.0 + 8.0, 600.0 + 83.0];
+            r.my_side_blue = Some(true);
+        }
         repaint();
         Ok(())
     }

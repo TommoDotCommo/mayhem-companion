@@ -7,6 +7,11 @@ A native Windows app for ARAM: Mayhem, written in Rust. It's a single 7 MB `.exe
   - **BEST / WORST** among the offered cards.
   - **Build fit** with the augment's category: **✓ FITS BUILD · AP**, **✗ OFF-BUILD · Crit** or **• ANY BUILD · Economy**.
   - Rerolls update the badges straight away. **F8** toggles a panel with your champion's best augments and builds.
+- **Heal relic timers:** a small bar at the top of the screen shows all four Howling Abyss relics in scoreboard order (blue inner, blue outer, red outer, red inner), with your side marked.
+  - **First spawns:** automatic from the game clock (1:45 outer, 2:30 inner).
+  - **Respawns:** holding **Tab** syncs all four from the game's own scoreboard timers; the bar keeps counting after you let go.
+  - **Manual backup:** **Alt+1–4** marks a relic taken (press again within 3 s to undo).
+  - Respawning relics turn yellow for their last 10 seconds, then show a green UP.
 - **Champ select:** the companion window opens with your pick, bench and team, each with a tier and win rate. The bench shows the win-rate gap against your pick, and you swap with one click; you can also reroll from there. Your build is imported as a `[Mayhem]` item set and your summoner spells are set, keeping Flash on the key you already use.
 - **Browse:** a champion tier list, with each champion's augments (by rarity and pick round) and core builds that import with one click. There's also an augment tier list showing which champions each augment is best and worst on.
 
@@ -21,6 +26,8 @@ Run `aram-mayhem.exe`. It starts a small background service (tray icon) and open
 | **F7** | show or hide the companion (starts it if it's closed) |
 | **F8** | in-game panel |
 | **Ctrl+Shift+F8** | quit everything |
+| **Tab** (held) | syncs the relic timers from the scoreboard |
+| **Alt+1–4** | relic taken: blue inner, blue outer, red outer, red inner |
 | Tray icon | left-click opens the companion; right-click offers *Start with Windows* and *Quit* |
 
 **League must be in Borderless or Windowed mode.** Nothing can draw over exclusive Fullscreen.
@@ -36,6 +43,7 @@ aram-mayhem.exe  (service, ~40 MB, always on)
 ├─ scan      DXGI desktop duplication → Windows.Media.Ocr → fuzzy name match
 │            (newest frame stays on the GPU; only the title strip is copied back;
 │             unchanged desktop or unchanged strip = no copy / no OCR; GDI fallback)
+├─ relics    game-clock relic timers; scoreboard OCR sync while Tab is held
 ├─ overlay   layered Win32 windows drawn with Direct2D/DirectWrite;
 │            click-through, never focused, hidden from capture, no render loop
 └─ ipc       127.0.0.1 JSON lines → companion

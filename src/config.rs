@@ -56,6 +56,21 @@ pub struct Config {
     pub panel_x: i32,
     pub panel_y: i32,
     pub panel_rows: usize,
+    /// Heal relic timers (Howling Abyss): first spawns, respawn, and where the bar sits.
+    pub relic_timers: bool,
+    pub relic_first_outer: f64,
+    pub relic_first_inner: f64,
+    pub relic_respawn: f64,
+    /// Seconds between pickup and the respawn timer starting (the heal beam).
+    pub relic_beam_delay: f64,
+    /// Hotkeys to mark a relic taken, in scoreboard order: blue inner, blue outer,
+    /// red outer, red inner. Press again within 3 s to undo.
+    pub relic_hotkeys: Vec<String>,
+    /// Hold this to show the scoreboard: the relic timers on it are read to sync the bar.
+    pub scoreboard_key: String,
+    /// Bar position: x offset from screen centre, y from the top (both at 100% scaling).
+    pub relic_x: i32,
+    pub relic_y: i32,
 }
 
 impl Default for Config {
@@ -87,6 +102,15 @@ impl Default for Config {
             panel_x: -24,
             panel_y: 140,
             panel_rows: 8,
+            relic_timers: true,
+            relic_first_outer: 105.0,
+            relic_first_inner: 150.0,
+            relic_respawn: 90.0,
+            relic_beam_delay: 2.5,
+            relic_hotkeys: vec!["alt+1".into(), "alt+2".into(), "alt+3".into(), "alt+4".into()],
+            scoreboard_key: "tab".into(),
+            relic_x: 0,
+            relic_y: 6,
         }
     }
 }

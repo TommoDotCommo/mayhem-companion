@@ -7,7 +7,7 @@
 use crate::config::{data_dir, Config};
 use crate::model::{augment_fit, norm, Meta};
 use crate::overlay::{OverlayCmd, OverlayHandle};
-use crate::state::{repaint, Badge, ScanMode, ScanRef, SharedRef, Tag};
+use crate::state::{repaint, Badge, RelicRef, ScanMode, ScanRef, SharedRef, Tag};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use windows::core::HSTRING;
@@ -26,6 +26,31 @@ pub struct Word {
     pub y: f32,
     pub w: f32,
     pub h: f32,
+}
+
+/// "1:33" / "1.33" / "0:07" -> seconds.
+pub fn parse_clock(text: &str) -> Option<u32> {
+    let t = text.trim().trim_end_matches(|c: char| !c.is_ascii_digit());
+    let (m, s) = t.split_once([':', '.', ';'])?;
+    if m.is_empty() || m.len() > 2 || s.len() != 2 {
+        return None;
+    }
+    let (m, s): (u32, u32) = (m.parse().ok()?, s.parse().ok()?);
+    (s < 60 && m < 10).then_some(m * 60 + s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_clock;
+    #[test]
+    fn clocks() {
+        assert_eq!(parse_clock("2:18"), Some(138));
+        assert_eq!(parse_clock("1.33"), Some(93));
+        assert_eq!(parse_clock("0:07"), Some(7));
+        assert_eq!(parse_clock("12:34"), None); // the game clock, not a relic
+        assert_eq!(parse_clock("2.5"), None);
+        assert_eq!(parse_clock("Relic"), None);
+    }
 }
 
 /// Cheap fingerprint of a strip (every 7th pixel) to skip OCR when nothing changed.
@@ -252,16 +277,22 @@ impl Layout {
         format!("{}x{}", screen.0, screen.1)
     }
     fn load(&self, screen: (i32, i32)) -> Option<(i32, i32)> {
+        self.load_key(&Self::key(screen))
+    }
+    fn load_key(&self, key: &str) -> Option<(i32, i32)> {
         let text = std::fs::read_to_string(&self.path).ok()?;
         let map: HashMap<String, (i32, i32)> = serde_json::from_str(&text).ok()?;
-        map.get(&Self::key(screen)).copied()
+        map.get(key).copied()
     }
     fn save(&self, screen: (i32, i32), band: (i32, i32)) {
+        self.save_key(&Self::key(screen), band)
+    }
+    fn save_key(&self, key: &str, value: (i32, i32)) {
         let mut map: HashMap<String, (i32, i32)> = std::fs::read_to_string(&self.path)
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
             .unwrap_or_default();
-        map.insert(Self::key(screen), band);
+        map.insert(key.to_string(), value);
         let _ = std::fs::write(&self.path, serde_json::to_string(&map).unwrap_or_default());
     }
 }
@@ -269,6 +300,10 @@ impl Layout {
 pub struct Scanner {
     reader: Reader,
     band: Option<(i32, i32)>,
+    relic_band: Option<(i32, i32)>,
+    relic_spacing: Option<f32>,
+    relic_absent: [u8; 4],
+    relic_band_misses: u8,
     layout: Layout,
     matcher: Option<(usize, Matcher)>,
     last_print: u64,
@@ -280,7 +315,20 @@ impl Scanner {
         let reader = Reader::new(&cfg.ocr_language)?;
         let layout = Layout { path: data_dir().join("layout.json") };
         let band = layout.load(reader.screen);
-        Ok(Scanner { reader, band, layout, matcher: None, last_print: 0, last_found: vec![] })
+        let relic_band = layout.load_key(&format!("relics:{}", Layout::key(reader.screen)));
+        let relic_spacing = layout.load_key(&format!("relicgap:{}", Layout::key(reader.screen))).map(|(s, _)| s as f32);
+        Ok(Scanner {
+            reader,
+            band,
+            relic_band,
+            relic_spacing,
+            relic_absent: [0; 4],
+            relic_band_misses: 0,
+            layout,
+            matcher: None,
+            last_print: 0,
+            last_found: vec![],
+        })
     }
 
     fn matcher(&mut self, meta: &std::sync::Arc<Meta>) -> &Matcher {
@@ -362,6 +410,107 @@ impl Scanner {
         vec![]
     }
 
+    /// Read the relic timers off the scoreboard (while it's open) and sync the clock.
+    /// The scoreboard shows "m:ss" per relic still respawning and nothing for ones that are up.
+    pub fn relic_sync(&mut self, relics: &RelicRef) {
+        let (sw, sh) = self.reader.screen;
+        let (x0, w) = ((sw as f32 * 0.30) as i32, (sw as f32 * 0.40) as i32);
+        let mut lines = vec![];
+        match self.relic_band {
+            Some((top, bottom)) => lines.extend(self.reader.read(x0, top, w, bottom - top).unwrap_or_default()),
+            None => {
+                let (h, step) = ((sh as f32 * 0.08) as i32, (sh as f32 * 0.05) as i32);
+                let mut y = (sh as f32 * 0.02) as i32;
+                while y < (sh as f32 * 0.60) as i32 {
+                    lines.extend(self.reader.read(x0, y, w, h).unwrap_or_default());
+                    y += step;
+                }
+            }
+        }
+        // time tokens near the screen centre, grouped into rows
+        let cx = sw as f32 / 2.0;
+        let mut tokens: Vec<(f32, f32, f32, u32)> = lines
+            .iter()
+            .flatten()
+            .filter_map(|w| parse_clock(&w.text).map(|secs| (w.x + w.w / 2.0, w.y, w.h, secs)))
+            .filter(|t| (t.0 - cx).abs() < sw as f32 * 0.15)
+            .collect();
+        if tokens.is_empty() {
+            // scoreboard not open, or every relic up. If the remembered strip keeps coming
+            // back empty while the key is held, it may be stale: search the screen again.
+            if self.relic_band.is_some() {
+                self.relic_band_misses += 1;
+                if self.relic_band_misses >= 6 {
+                    self.relic_band = None;
+                    self.relic_band_misses = 0;
+                }
+            }
+            return;
+        }
+        self.relic_band_misses = 0;
+        tokens.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let mut rows: Vec<Vec<(f32, f32, f32, u32)>> = vec![];
+        for t in tokens {
+            match rows.iter_mut().find(|r| (r[0].1 - t.1).abs() < t.2.max(4.0)) {
+                Some(r) => r.push(t),
+                None => rows.push(vec![t]),
+            }
+        }
+        let mut row = rows.into_iter().max_by_key(|r| r.len()).unwrap_or_default();
+        row.sort_by(|a, b| a.0.total_cmp(&b.0));
+        row.dedup_by(|a, b| (a.0 - b.0).abs() < 4.0);
+        if row.len() > 4 {
+            return;
+        }
+        let th = row.iter().map(|t| t.2).fold(0.0, f32::max);
+        let key = Layout::key(self.reader.screen);
+        if row.len() == 4 {
+            let gap = (row[3].0 - row[0].0) / 3.0;
+            if self.relic_spacing.map(|s| (s - gap).abs() > 2.0).unwrap_or(true) {
+                self.relic_spacing = Some(gap);
+                self.layout.save_key(&format!("relicgap:{key}"), (gap.round() as i32, 0));
+            }
+        }
+        let y = row[0].1;
+        let band = ((y - th * 1.5).max(0.0) as i32, (y + th * 2.5) as i32);
+        if self.relic_band.map(|b| (b.0 - band.0).abs() > 6).unwrap_or(true) {
+            self.relic_band = Some(band);
+            self.layout.save_key(&format!("relics:{key}"), band);
+            log::info!("relic timers found at y={y}");
+        }
+        // which slot is each token in? slots sit at centre ± 0.5 and ± 1.5 spacings
+        let s = self.relic_spacing.unwrap_or(th * 4.6);
+        let slots = [cx - 1.5 * s, cx - 0.5 * s, cx + 0.5 * s, cx + 1.5 * s];
+        let mut seen = [None; 4];
+        for t in &row {
+            let (k, d) = slots.iter().enumerate().map(|(k, sx)| (k, (t.0 - sx).abs())).min_by(|a, b| a.1.total_cmp(&b.1)).unwrap();
+            if d < s * 0.45 {
+                seen[k] = Some(t.3);
+            }
+        }
+        let mut c = relics.lock().unwrap();
+        if !c.active {
+            return;
+        }
+        let now = c.now();
+        for k in 0..4 {
+            match seen[k] {
+                Some(secs) => {
+                    c.ready_at[k] = now + secs as f64 + 0.5;
+                    self.relic_absent[k] = 0;
+                }
+                None => {
+                    // no timer in that slot on two reads in a row: it's up
+                    self.relic_absent[k] = self.relic_absent[k].saturating_add(1);
+                    if self.relic_absent[k] >= 2 && c.ready_at[k] > now {
+                        c.ready_at[k] = now;
+                    }
+                }
+            }
+        }
+        log::debug!("relic sync: {seen:?}");
+    }
+
     pub fn has_band(&self) -> bool {
         self.band.is_some()
     }
@@ -424,7 +573,12 @@ pub fn make_badges(hits: &[Hit], meta: &Meta, ctl: &crate::state::ScanCtl) -> Ve
     out
 }
 
-pub fn spawn(cfg: Config, ctl: ScanRef, shared: SharedRef, overlay: OverlayHandle) {
+fn key_held(vk: u32) -> bool {
+    unsafe { (windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(vk as i32) as u16 & 0x8000) != 0 }
+}
+
+pub fn spawn(cfg: Config, ctl: ScanRef, shared: SharedRef, relics: RelicRef, overlay: OverlayHandle) {
+    let scoreboard_vk = crate::overlay::parse_hotkey(&cfg.scoreboard_key).map(|(_, vk)| vk).unwrap_or(0x09);
     std::thread::Builder::new()
         .name("scanner".into())
         .spawn(move || {
@@ -474,6 +628,9 @@ pub fn spawn(cfg: Config, ctl: ScanRef, shared: SharedRef, overlay: OverlayHandl
                     std::thread::sleep(Duration::from_millis(400));
                     continue;
                 };
+                if relics.lock().unwrap().active && key_held(scoreboard_vk) {
+                    scanner.relic_sync(&relics);
+                }
                 let t0 = Instant::now();
                 // a full sweep reads ~13 strips, so only fall back to it now and then
                 let full = (!scanner.has_band() && last_full.elapsed() > Duration::from_secs(2))
@@ -520,8 +677,15 @@ pub fn spawn(cfg: Config, ctl: ScanRef, shared: SharedRef, overlay: OverlayHandl
                         repaint();
                     }
                 }
-                let spent = t0.elapsed();
-                std::thread::sleep(Duration::from_millis(interval).saturating_sub(spent).max(Duration::from_millis(30)));
+                // sleep until the next scan, but wake early for the scoreboard key
+                let deadline = t0 + Duration::from_millis(interval).max(Duration::from_millis(30));
+                while Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(40));
+                    if key_held(scoreboard_vk) && relics.lock().unwrap().active {
+                        scanner.relic_sync(&relics);
+                        std::thread::sleep(Duration::from_millis(210));
+                    }
+                }
             }
         })
         .expect("spawn scanner");

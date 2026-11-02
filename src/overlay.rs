@@ -5,7 +5,7 @@
 
 use crate::config::Config;
 use crate::model::{Fit, Tier};
-use crate::state::{Badge, Tag};
+use crate::state::{Badge, RelicRef, Tag};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -71,14 +71,14 @@ impl OverlayHandle {
     }
 }
 
-pub fn spawn(cfg: Config) -> OverlayHandle {
+pub fn spawn(cfg: Config, relics: RelicRef) -> OverlayHandle {
     let (tx, rx) = channel();
     let tid = Arc::new(AtomicU32::new(0));
     let tid2 = tid.clone();
     std::thread::Builder::new()
         .name("overlay".into())
         .spawn(move || {
-            if let Err(e) = unsafe { run(cfg, rx, tid2) } {
+            if let Err(e) = unsafe { run(cfg, rx, tid2, relics) } {
                 log::error!("overlay stopped: {e}");
             }
         })
@@ -423,6 +423,9 @@ struct Overlay {
     panel_content: Option<PanelContent>,
     panel_shown: bool,
     dpi_scale: f32,
+    relics: RelicRef,
+    relic_layer: Option<Layer>,
+    relic_key: String,
 }
 
 impl Overlay {
@@ -710,6 +713,121 @@ impl Overlay {
         }
     }
 
+    // ---- heal relic timers (top of the screen, scoreboard order)
+
+    unsafe fn render_relics(&mut self) {
+        let c = *self.relics.lock().unwrap();
+        if !c.active {
+            if let Some(l) = self.relic_layer.as_mut() {
+                if l.visible {
+                    Self::show(l, false);
+                }
+            }
+            self.relic_key.clear();
+            return;
+        }
+        let now = c.now();
+        let cells: Vec<(String, f64)> = (0..4)
+            .map(|i| {
+                let rem = c.ready_at[i] - now;
+                if rem <= 0.0 {
+                    ("UP".to_string(), rem)
+                } else {
+                    let s = rem.ceil() as i64;
+                    (format!("{}:{:02}", s / 60, s % 60), rem)
+                }
+            })
+            .collect();
+        let key = format!("{:?}{:?}", cells.iter().map(|c| &c.0).collect::<Vec<_>>(), c.my_side_blue);
+        if key == self.relic_key && self.relic_layer.as_ref().is_some_and(|l| l.visible) {
+            return; // nothing visible changed: no redraw
+        }
+        self.relic_key = key;
+        if self.relic_layer.is_none() {
+            self.relic_layer = Some(self.new_layer());
+        }
+        let p = &mut self.painter;
+        let s = 15.0 * self.dpi_scale * self.cfg.panel_scale;
+        let (cell_w, cell_h, gap, mid) = (s * 4.0, s * 2.1, s * 0.3, s * 0.9);
+        let marker_h = if c.my_side_blue.is_some() { s * 1.1 } else { 0.0 };
+        let w = (4.0 * cell_w + 2.0 * gap + mid + 4.0).ceil();
+        let h = (cell_h + marker_h + 4.0).ceil();
+        let texts: Vec<Text> = cells
+            .iter()
+            .map(|(t, _)| p.text(t, s * 1.05, if t == "UP" { DWRITE_FONT_WEIGHT_BOLD } else { DWRITE_FONT_WEIGHT_SEMI_BOLD }))
+            .collect();
+        let plus = p.text("+", s * 1.1, DWRITE_FONT_WEIGHT_BLACK);
+        let you = p.text("YOUR SIDE", s * 0.62, DWRITE_FONT_WEIGHT_BOLD);
+        let sw = GetSystemMetrics(SM_CXSCREEN);
+        let x = sw / 2 - (w as i32) / 2 + (self.cfg.relic_x as f32 * self.dpi_scale) as i32;
+        let y = (self.cfg.relic_y as f32 * self.dpi_scale) as i32;
+        let layer = self.relic_layer.as_mut().unwrap();
+        Self::present(p, layer, x, y, w as i32, h as i32, |p| {
+            let mut cx = 2.0;
+            for i in 0..4 {
+                if i == 2 {
+                    cx += mid - gap;
+                }
+                let blue = i < 2;
+                let side = if blue { [0x3a, 0xa0, 0xff] } else { [0xff, 0x5a, 0x5a] };
+                let (label, rem) = (&cells[i].0, cells[i].1);
+                let up = label == "UP";
+                p.fill(cx, 2.0, cell_w, cell_h, 5.0, BG, 0.88);
+                p.fill(cx + 4.0, 2.0, cell_w - 8.0, 3.0, 1.5, side, 1.0);
+                if up {
+                    p.stroke(cx + 0.5, 2.5, cell_w - 1.0, cell_h - 1.0, 5.0, [0x4a, 0xde, 0x80], 1.5);
+                }
+                let green = [0x4a, 0xde, 0x80];
+                let plus_rgb = if up { green } else { [0x3a, 0x55, 0x48] };
+                let t = &texts[i];
+                let content = plus.w + s * 0.25 + t.w;
+                let x0 = cx + (cell_w - content) / 2.0;
+                p.draw(&plus, x0, 2.0 + (cell_h - plus.h) / 2.0 + s * 0.05, plus_rgb);
+                let rgb = if up {
+                    green
+                } else if rem <= 10.0 {
+                    [0xf5, 0xc5, 0x18]
+                } else {
+                    FG
+                };
+                p.draw(t, x0 + plus.w + s * 0.25, 2.0 + (cell_h - t.h) / 2.0 + s * 0.1, rgb);
+                cx += cell_w + gap;
+            }
+            if let Some(mine_blue) = c.my_side_blue {
+                let pair_w = 2.0 * cell_w + gap;
+                let px = if mine_blue { 2.0 } else { 2.0 + pair_w + mid };
+                let ty = 2.0 + cell_h + 2.0;
+                p.draw(&you, px + (pair_w - you.w) / 2.0, ty, if mine_blue { [0x3a, 0xa0, 0xff] } else { [0xff, 0x5a, 0x5a] });
+            }
+        });
+        let layer = self.relic_layer.as_mut().unwrap();
+        if !layer.visible {
+            Self::show(layer, true);
+        }
+    }
+
+    /// Hotkey: relic `i` was just taken (press again within 3 s to undo).
+    fn mark_relic(&mut self, i: usize) {
+        let mut c = self.relics.lock().unwrap();
+        if !c.active {
+            return;
+        }
+        let now = c.now();
+        if c.marked[i].is_some_and(|t| t.elapsed().as_secs_f64() < 3.0) {
+            c.ready_at[i] = c.before_mark[i];
+            c.marked[i] = None;
+            log::info!("relic {i}: mark undone");
+        } else {
+            c.before_mark[i] = c.ready_at[i];
+            c.ready_at[i] = now + self.cfg.relic_beam_delay + self.cfg.relic_respawn;
+            c.marked[i] = Some(std::time::Instant::now());
+            log::info!("relic {i}: taken (hotkey)");
+        }
+        drop(c);
+        self.relic_key.clear();
+        unsafe { self.render_relics() };
+    }
+
     unsafe fn handle(&mut self, cmd: OverlayCmd) {
         match cmd {
             OverlayCmd::Badges(b) => self.set_badges(&b),
@@ -733,7 +851,7 @@ impl Overlay {
     }
 }
 
-unsafe fn run(cfg: Config, rx: Receiver<OverlayCmd>, tid: Arc<AtomicU32>) -> windows::core::Result<()> {
+unsafe fn run(cfg: Config, rx: Receiver<OverlayCmd>, tid: Arc<AtomicU32>, relics: RelicRef) -> windows::core::Result<()> {
     // make sure this thread has a message queue before publishing its id
     let mut msg = MSG::default();
     let _ = PeekMessageW(&mut msg, HWND::default(), 0, 0, PM_NOREMOVE);
@@ -759,7 +877,9 @@ unsafe fn run(cfg: Config, rx: Receiver<OverlayCmd>, tid: Arc<AtomicU32>) -> win
         (2, cfg.companion_hotkey.clone()),
         (3, cfg.quit_hotkey.clone()),
     ];
-    for (id, combo) in &hotkeys {
+    let relic_keys: Vec<(i32, String)> =
+        cfg.relic_hotkeys.iter().take(4).enumerate().map(|(i, k)| (11 + i as i32, k.clone())).collect();
+    for (id, combo) in hotkeys.iter().chain(relic_keys.iter()) {
         match parse_hotkey(combo) {
             Some((m, vk)) => {
                 if RegisterHotKey(HWND::default(), *id, HOT_KEY_MODIFIERS(m), vk).is_err() {
@@ -769,7 +889,9 @@ unsafe fn run(cfg: Config, rx: Receiver<OverlayCmd>, tid: Arc<AtomicU32>) -> win
             None => log::error!("can't parse hotkey {combo}"),
         }
     }
-    SetTimer(HWND::default(), 1, 1500, None);
+    // thread timers (no window) get IDs assigned by Windows: keep the ones it returns
+    let raise_timer = SetTimer(HWND::default(), 0, 1500, None);
+    let relic_timer = SetTimer(HWND::default(), 0, 200, None); // relic tick; redraws only when a digit changes
     let tray = add_tray(hinst);
 
     let mut ov = Overlay {
@@ -781,6 +903,9 @@ unsafe fn run(cfg: Config, rx: Receiver<OverlayCmd>, tid: Arc<AtomicU32>) -> win
         panel_content: None,
         panel_shown: false,
         dpi_scale,
+        relics,
+        relic_layer: None,
+        relic_key: String::new(),
     };
     while let Ok(cmd) = rx.try_recv() {
         ov.handle(cmd);
@@ -796,6 +921,7 @@ unsafe fn run(cfg: Config, rx: Receiver<OverlayCmd>, tid: Arc<AtomicU32>) -> win
                 1 => ov.handle(OverlayCmd::PanelVisible(None)),
                 2 => toggle_companion(),
                 3 => quit(),
+                id @ 11..=14 => ov.mark_relic(id - 11),
                 _ => {}
             },
             WM_APP_TRAY_FWD => match (msg.lParam.0 as u32) & 0xffff {
@@ -812,9 +938,10 @@ unsafe fn run(cfg: Config, rx: Receiver<OverlayCmd>, tid: Arc<AtomicU32>) -> win
                 }
                 _ => {}
             },
-            WM_TIMER => {
+            WM_TIMER if msg.wParam.0 == relic_timer => ov.render_relics(),
+            WM_TIMER if msg.wParam.0 == raise_timer => {
                 // borderless games can push themselves above us; reassert topmost
-                for l in ov.badges.iter().chain(ov.panel.iter()) {
+                for l in ov.badges.iter().chain(ov.panel.iter()).chain(ov.relic_layer.iter()) {
                     if l.visible {
                         Overlay::raise(l);
                     }

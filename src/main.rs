@@ -76,9 +76,10 @@ fn run_service(cfg: Config, data: Arc<data::Data>, args: &[String]) {
     log::info!("service starting ({})", env!("CARGO_PKG_VERSION"));
     let shared = Arc::new(RwLock::new(Shared::default()));
     let scan = Arc::new(Mutex::new(ScanCtl { max_round: 1, ..Default::default() }));
-    let overlay = overlay::spawn(cfg.clone());
+    let relics: state::RelicRef = Arc::new(Mutex::new(state::RelicClock::default()));
+    let overlay = overlay::spawn(cfg.clone(), relics.clone());
     if cfg.scan_cards {
-        scan::spawn(cfg.clone(), scan.clone(), shared.clone(), overlay.clone());
+        scan::spawn(cfg.clone(), scan.clone(), shared.clone(), relics.clone(), overlay.clone());
     } else {
         scan.lock().unwrap().error = Some("card scanning disabled in config".into());
     }
@@ -93,7 +94,7 @@ fn run_service(cfg: Config, data: Arc<data::Data>, args: &[String]) {
     }
     let (tx, rx) = mpsc::channel();
     ipc::serve(shared.clone(), tx.clone());
-    let mut engine = engine::Engine::new(cfg.clone(), data.clone(), shared.clone(), scan.clone(), overlay.clone());
+    let mut engine = engine::Engine::new(cfg.clone(), data.clone(), shared.clone(), scan.clone(), relics, overlay.clone());
     if args.first().map(String::as_str) == Some("--demo") {
         let champ = args.get(1).cloned().unwrap_or_else(|| "Annie".into());
         let round = args.get(2).and_then(|r| r.parse().ok()).unwrap_or(1);
@@ -198,6 +199,20 @@ fn scan_once(cfg: &Config, data: &Arc<data::Data>, champ: &str) {
         let cached = cached / 20;
         // a live game repaints every frame: measure a forced strip copy + fingerprint (no OCR)
         let forced = scanner.reader().bench_copy(40);
+        // relic timers off the scoreboard (as if Tab were held)
+        let relics: state::RelicRef = Arc::new(Mutex::new(state::RelicClock::default()));
+        {
+            let mut r = relics.lock().unwrap();
+            r.start(105.0, 150.0);
+            r.game_time = 300.0;
+            r.at = Some(std::time::Instant::now());
+        }
+        let t = std::time::Instant::now();
+        scanner.relic_sync(&relics);
+        scanner.relic_sync(&relics);
+        let r = *relics.lock().unwrap();
+        let rem: Vec<String> = r.ready_at.iter().map(|t| format!("{:.0}s", t - r.now())).collect();
+        log::info!("relics (blue inner, blue outer, red outer, red inner): {rem:?} in {} ms", t.elapsed().as_millis() / 2);
         let ctl = ScanCtl { meta: Some(meta.clone()), ratings, max_round: 4, ..Default::default() };
         for b in scan::make_badges(&hits, &meta, &ctl) {
             log::info!("MATCH {} {} {:.1}% at ({}, {}) tag={:?} fit={:?}", b.name, b.tier.label(), b.wr * 100.0, b.x, b.y, b.tag, b.fit);
