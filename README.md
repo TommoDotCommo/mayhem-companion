@@ -33,8 +33,9 @@ Settings live in `%LOCALAPPDATA%\AramOverlay\config.json` (created on first run)
 aram-mayhem.exe  (service, ~40 MB, always on)
 ├─ lcu       League client: lockfile auth + WAMP websocket events (no polling)
 ├─ engine    champ select → item set + spells; in game: live API once a second
-├─ scan      GDI strip capture → Windows.Media.Ocr → fuzzy name match
-│            (skips OCR entirely when the strip's pixels haven't changed)
+├─ scan      DXGI desktop duplication → Windows.Media.Ocr → fuzzy name match
+│            (newest frame stays on the GPU; only the title strip is copied back;
+│             unchanged desktop or unchanged strip = no copy / no OCR; GDI fallback)
 ├─ overlay   layered Win32 windows drawn with Direct2D/DirectWrite;
 │            click-through, never focused, hidden from capture, no render loop
 └─ ipc       127.0.0.1 JSON lines → companion
@@ -50,10 +51,12 @@ The OCR engine is created when a Mayhem game starts and released a minute after 
 
 | | |
 | --- | --- |
-| First sweep to find the cards | 160 ms, once per resolution |
-| Each locked-strip scan | 10 ms |
-| Unchanged screen (OCR skipped) | 7 ms, all GDI capture |
-| Service RAM, idle | ~40 MB |
+| First sweep to find the cards | 145 ms, once per resolution |
+| Strip scan with OCR | 8 ms |
+| Strip copy + fingerprint (screen changed, no OCR) | 0.16 ms (GDI: 7 ms) |
+| Desktop unchanged | 0.004 ms |
+| Service RAM | ~40 MB idle, ~60 MB scanning in game |
+| Companion RAM | ~100 MB while open; it closes when the game starts |
 
 ## Tiers
 

@@ -759,22 +759,24 @@ impl App {
         let Some(row) = self.aug_rows.iter().find(|r| r.id == id) else { return };
         let (name, url, desc, labels, rating, rarity) =
             (row.name.clone(), row.icon.clone(), row.desc.clone(), row.cat_labels.join(" · "), row.rating, row.rarity);
+        let width = ui.available_width();
+        ui.set_max_width(width);
         ui.horizontal(|ui| {
             let tex = self.tex(ui.ctx(), &url);
             icon(ui, tex, 56.0, 8.0);
             ui.vertical(|ui| {
-                ui.label(RichText::new(&name).font(bold(20.0)));
+                ui.add(egui::Label::new(RichText::new(&name).font(bold(20.0))).wrap());
                 let (_, rname, rcol) = RARITIES[rarity];
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(rname).font(semi(12.5)).color(rgb(rcol)));
-                    ui.label(RichText::new(&labels).font(reg(12.5)).color(DIM));
-                });
+                ui.label(RichText::new(rname).font(semi(12.5)).color(rgb(rcol)));
             });
         });
+        if !labels.is_empty() {
+            ui.add(egui::Label::new(RichText::new(&labels).font(reg(12.5)).color(DIM)).wrap());
+        }
         ui.add_space(6.0);
-        ui.label(&desc);
+        ui.add(egui::Label::new(desc.as_str()).wrap());
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             tier_pill(ui, rating.tier, 14.0);
             ui.label(RichText::new(format!("{} across all champions · {:.0}k games", pct(rating.wr), rating.games / 1000.0)).color(DIM));
         });

@@ -9,15 +9,12 @@ use crate::model::{augment_fit, norm, Meta};
 use crate::overlay::{OverlayCmd, OverlayHandle};
 use crate::state::{repaint, Badge, ScanMode, ScanRef, SharedRef, Tag};
 use std::collections::HashMap;
-use std::ffi::c_void;
 use std::time::{Duration, Instant};
 use windows::core::HSTRING;
 use windows::Globalization::Language;
 use windows::Graphics::Imaging::{BitmapAlphaMode, BitmapPixelFormat, SoftwareBitmap};
 use windows::Media::Ocr::OcrEngine;
 use windows::Security::Cryptography::CryptographicBuffer;
-use windows::Win32::Foundation::HWND;
-use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
 use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
 
@@ -29,76 +26,6 @@ pub struct Word {
     pub y: f32,
     pub w: f32,
     pub h: f32,
-}
-
-// ------------------------------------------------------------------ capture
-
-struct Capture {
-    screen: HDC,
-    mem: HDC,
-    bmp: HBITMAP,
-    size: (i32, i32),
-    buf: Vec<u8>,
-}
-
-impl Capture {
-    fn new() -> Capture {
-        unsafe {
-            let screen = GetDC(HWND::default());
-            let mem = CreateCompatibleDC(screen);
-            Capture { screen, mem, bmp: HBITMAP::default(), size: (0, 0), buf: Vec::new() }
-        }
-    }
-
-    /// BGRA pixels of a screen rectangle. Layered windows (our overlay) aren't captured.
-    fn grab(&mut self, x: i32, y: i32, w: i32, h: i32) -> &[u8] {
-        unsafe {
-            if self.size != (w, h) {
-                if !self.bmp.is_invalid() {
-                    let _ = DeleteObject(self.bmp);
-                }
-                self.bmp = CreateCompatibleBitmap(self.screen, w, h);
-                SelectObject(self.mem, self.bmp);
-                self.size = (w, h);
-                self.buf = vec![0u8; (w * h * 4) as usize];
-            }
-            let _ = BitBlt(self.mem, 0, 0, w, h, self.screen, x, y, SRCCOPY);
-            let mut info = BITMAPINFO {
-                bmiHeader: BITMAPINFOHEADER {
-                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                    biWidth: w,
-                    biHeight: -h,
-                    biPlanes: 1,
-                    biBitCount: 32,
-                    biCompression: BI_RGB.0,
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-            GetDIBits(
-                self.mem,
-                self.bmp,
-                0,
-                h as u32,
-                Some(self.buf.as_mut_ptr() as *mut c_void),
-                &mut info,
-                DIB_RGB_COLORS,
-            );
-            &self.buf
-        }
-    }
-}
-
-impl Drop for Capture {
-    fn drop(&mut self) {
-        unsafe {
-            if !self.bmp.is_invalid() {
-                let _ = DeleteObject(self.bmp);
-            }
-            let _ = DeleteDC(self.mem);
-            ReleaseDC(HWND::default(), self.screen);
-        }
-    }
 }
 
 /// Cheap fingerprint of a strip (every 7th pixel) to skip OCR when nothing changed.
@@ -115,7 +42,8 @@ fn fingerprint(pixels: &[u8]) -> u64 {
 
 pub struct Reader {
     engine: OcrEngine,
-    capture: Capture,
+    capture: crate::capture::Grabber,
+    last_print: u64,
     pub screen: (i32, i32),
 }
 
@@ -129,12 +57,31 @@ impl Reader {
             .or_else(|_| OcrEngine::TryCreateFromUserProfileLanguages())
             .map_err(|e| format!("Windows OCR unavailable for {language}: {e}"))?;
         let screen = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
-        Ok(Reader { engine, capture: Capture::new(), screen })
+        Ok(Reader { engine, capture: crate::capture::Grabber::new(), last_print: 0, screen })
     }
 
     /// Capture a rectangle; returns its fingerprint and lets OCR run on demand.
     fn grab(&mut self, x: i32, y: i32, w: i32, h: i32) -> u64 {
-        fingerprint(self.capture.grab(x, y, w, h))
+        if self.capture.grab(x, y, w, h) {
+            self.last_print = fingerprint(&self.capture.buf);
+        }
+        self.last_print
+    }
+
+    /// Average cost of grabbing + fingerprinting a fresh strip (alternating rects forces a copy).
+    pub fn bench_copy(&mut self, n: u32) -> std::time::Duration {
+        let (w, h) = (self.screen.0 * 84 / 100, 120);
+        let t = std::time::Instant::now();
+        for i in 0..n {
+            let y = if i % 2 == 0 { 550 } else { 551 };
+            self.capture.grab(self.screen.0 * 8 / 100, y, w, h);
+            self.last_print = fingerprint(&self.capture.buf);
+        }
+        t.elapsed() / n
+    }
+
+    pub fn backend(&self) -> &'static str {
+        self.capture.backend()
     }
 
     /// OCR the last grabbed rectangle (origin x, y) into lines of words in screen coords.

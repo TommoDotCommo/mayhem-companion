@@ -7,6 +7,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod capture;
 mod config;
 mod data;
 mod engine;
@@ -188,19 +189,27 @@ fn scan_once(cfg: &Config, data: &Arc<data::Data>, champ: &str) {
         let t = std::time::Instant::now();
         let again = scanner.scan(&meta, false);
         let strip = t.elapsed();
-        let t = std::time::Instant::now();
-        let _ = scanner.scan(&meta, false);
-        let cached = t.elapsed();
+        let mut cached = std::time::Duration::ZERO;
+        for _ in 0..20 {
+            let t = std::time::Instant::now();
+            let _ = scanner.scan(&meta, false);
+            cached += t.elapsed();
+        }
+        let cached = cached / 20;
+        // a live game repaints every frame: measure a forced strip copy + fingerprint (no OCR)
+        let forced = scanner.reader().bench_copy(40);
         let ctl = ScanCtl { meta: Some(meta.clone()), ratings, max_round: 4, ..Default::default() };
         for b in scan::make_badges(&hits, &meta, &ctl) {
             log::info!("MATCH {} {} {:.1}% at ({}, {}) tag={:?} fit={:?}", b.name, b.tier.label(), b.wr * 100.0, b.x, b.y, b.tag, b.fit);
         }
         log::info!(
-            "timing: find+lock {} ms, strip scan {} ms ({} hits), unchanged strip {} us",
+            "timing [{}]: find+lock {} ms, strip scan {} ms ({} hits), repeat scan avg {} us, strip copy avg {} us",
+            scanner.reader().backend(),
             locked.as_millis(),
             strip.as_millis(),
             again.len(),
-            cached.as_micros()
+            cached.as_micros(),
+            forced.as_micros()
         );
         Ok(())
     };
