@@ -1,58 +1,77 @@
-# ARAM Mayhem Overlay
+# ARAM Mayhem
 
-A small always-on-top panel for ARAM: Mayhem. It shows the best and worst augments for your champion in each rarity, then imports that champion's build into the client.
+A native Windows app for ARAM: Mayhem, written in Rust. It's a single 7 MB `.exe` that needs no runtime.
 
-- **Champ select:** the overlay appears when you lock or swap a champion. It writes a `[Mayhem] <Champion>` item set (core builds, boots and high-win-rate items) and sets your recommended summoner spells, keeping Flash on whichever key you already use.
-- **In game:** when the augment cards come up, each one gets a badge showing:
-  - **Tier and win rate** (**S+ S A B C D F**) for your champion, at the pick round you're on (R1 to R4). An augment can be great as a first pick and mediocre as a fourth.
+- **In game:** when augment cards come up, each one gets a badge:
+  - **Tier and win rate** (**S+ S A B C D F**) for your champion, at the pick round you're on (R1–R4).
   - **BEST / WORST** among the offered cards.
-  - **Build fit** with the augment's category: **✓ FITS BUILD · AP**, **✗ OFF-BUILD · Crit** or **• ANY BUILD · Economy**. Your build is worked out from your items. Before you've bought anything, it uses your champion's most common build; the panel footer shows which. Rerolls update the badges straight away. Press **F8** to show or hide the full panel. The overlay is click-through and never takes focus from the game.
-- **Quit:** Ctrl+Shift+F8.
+  - **Build fit** with the augment's category: **✓ FITS BUILD · AP**, **✗ OFF-BUILD · Crit** or **• ANY BUILD · Economy**.
+  - Rerolls update the badges straight away. **F8** toggles a panel with your champion's best augments and builds.
+- **Champ select:** the companion window opens with your pick, bench and team, each with a tier and win rate. The bench shows the win-rate gap against your pick, and you swap with one click; you can also reroll from there. Your build is imported as a `[Mayhem]` item set and your summoner spells are set, keeping Flash on the key you already use.
+- **Browse:** a champion tier list, with each champion's augments (by rarity and pick round) and core builds that import with one click. There's also an augment tier list showing which champions each augment is best and worst on.
 
-It needs Windows Python 3.9+. The card badges also use Windows' built-in OCR engine, which needs one install:
+Data comes from [arammeta.com](https://arammeta.com) ([MIT source](https://github.com/Lanternko/ARAM-Mayhem-Database)), built from about 800k Mayhem games per patch. Not endorsed by Riot Games.
 
-    py -m pip install -r requirements.txt
+## Use
 
-Without that install, everything else still works, and the panel pops up at augment levels instead.
+Run `aram-mayhem.exe`. It starts a small background service (tray icon) and opens the companion window.
 
-## Run
-
-Double-click `run.bat`, or run `pythonw aram_overlay.py`.
-
-- Preview without League: `python aram_overlay.py --demo "Miss Fortune"`
-- Data as text: `python aram_overlay.py --print Jinx`
-
-**League must be in Borderless or Windowed mode.** Overlays cannot draw over exclusive Fullscreen. Change it in Settings → Video → Window Mode.
-
-## Settings (`config.json`)
-
-| key | meaning |
+| | |
 | --- | --- |
-| `toggle_hotkey`, `quit_hotkey` | e.g. `F8`, `ctrl+shift+a`, `alt+space` |
-| `x`, `y` | position in pixels; a negative `x` is the distance from the right edge |
-| `tier_cutoffs`, `smoothing_games` | how win rate maps to S–D (see below) |
-| `scan_interval_fast`, `scan_interval_slow` | seconds between card scans while dead or at game start, and while alive (0 = off) |
-| `hide_from_capture` | `true` hides the overlay from OBS and screenshots |
-| `ocr_language` | must match your client language (default `en-US`) |
-| `import_item_set`, `set_summoner_spells` | turn off the client import |
-| `only_mayhem` | `false` to also show the overlay in other queues |
-| `per_rarity`, `avoid_per_rarity`, `font_size`, `opacity` | how it looks |
-| `league_dir` | change it if League isn't installed in `C:\Riot Games\League of Legends` |
+| **F7** | show or hide the companion (starts it if it's closed) |
+| **F8** | in-game panel |
+| **Ctrl+Shift+F8** | quit everything |
+| Tray icon | left-click opens the companion; right-click offers *Start with Windows* and *Quit* |
 
-## How it works
+**League must be in Borderless or Windowed mode.** Nothing can draw over exclusive Fullscreen.
 
-- `lockfile` → League client API: game phase, queue, champ select, item sets and spells.
-- `127.0.0.1:2999` → Live Client Data API: game time and whether you're dead. Augments can only be picked at game start or while dead, so the card scan runs quickly then and slowly otherwise.
-- **Card reading:** the screen is captured in thin horizontal strips with GDI, read with `Windows.Media.Ocr`, and the text is matched against the augment list, allowing for small misreads. Whole-card captures confuse the OCR, which reads the card frames as giant letters. Once the titles are found, that strip is saved to `layout.json` for your resolution, so later scans cost about 10 ms. Delete that file if badges ever stop appearing.
-- Stats come from [arammeta.com](https://arammeta.com) ([source, MIT](https://github.com/Lanternko/ARAM-Mayhem-Database)), built from Mayhem (queue 2400) match data. They are cached in `%LOCALAPPDATA%\AramOverlay\cache` for 12 hours, so each champion costs about one 90 KB request per day.
-- Log file: `%LOCALAPPDATA%\AramOverlay\overlay.log`.
+Settings live in `%LOCALAPPDATA%\AramOverlay\config.json` (created on first run), and the log is `overlay.log` in the same folder.
 
-**Tiers** compare each augment's win rate on your champion with that champion's overall win rate. Small samples are first pulled toward the average (`smoothing_games`), so 40 lucky games can't make an augment S tier. Default cut-offs: S+ ≥ +3.5%, S ≥ +2.0%, A ≥ +0.8%, B ≥ −1.0%, C ≥ −2.5%, D ≥ −4.0%, and F below that. That usually gives a handful of S+ and F augments per champion. BEST and WORST use the same smoothed number, so a tiny sample can't win BEST. An augment with no data for your champion uses its all-champion win rate and is marked "(all)".
+## Architecture
 
-**Win rates shown** are sample-adjusted, the same number that sets the tier, so BEST always has the highest number. Each pick round's win rate is pulled toward the augment's overall result, because each round has only about a quarter of the games.
+```
+aram-mayhem.exe  (service, ~40 MB, always on)
+├─ lcu       League client: lockfile auth + WAMP websocket events (no polling)
+├─ engine    champ select → item set + spells; in game: live API once a second
+├─ scan      GDI strip capture → Windows.Media.Ocr → fuzzy name match
+│            (skips OCR entirely when the strip's pixels haven't changed)
+├─ overlay   layered Win32 windows drawn with Direct2D/DirectWrite;
+│            click-through, never focused, hidden from capture, no render loop
+└─ ipc       127.0.0.1 JSON lines → companion
 
-**Pick round** is the number of card screens you've closed this game plus one, capped by the levels you've reached (3/7/11/15).
+aram-mayhem.exe --companion  (egui, GPU-rendered; repaints only on change)
+   Opens for champ select and closes when the game starts, so its GPU memory
+   (~60–200 MB, mostly the graphics driver) is only paid while it's useful.
+```
 
-**Build fit** scores your items by their actual stats from Riot's Data Dragon: AP, AD and attack speed, crit, health and resistances, and support items (mana regen, auras). Augment categories come from arammeta. Damage-amp augments count as off-build on tank and support builds. Cooldown augments fit AP or high-haste builds. Anything else is "any build". This tag is a rule of thumb, not a win rate: nobody publishes augment win rates split by build.
+The OCR engine is created when a Mayhem game starts and released a minute after it ends. Card titles are read in horizontal strips, because whole-card captures make the OCR read the card frames as letters. The strip is remembered per resolution in `layout.json`.
 
-**Limits:** the card text must be in English, matching `ocr_language`. An augment missing from the current dataset, such as one that was just added, gets no badge.
+**Measured** (2560×1440, demo cards on screen):
+
+| | |
+| --- | --- |
+| First sweep to find the cards | 160 ms, once per resolution |
+| Each locked-strip scan | 10 ms |
+| Unchanged screen (OCR skipped) | 7 ms, all GDI capture |
+| Service RAM, idle | ~40 MB |
+
+## Tiers
+
+Each augment's win rate on your champion is compared with that champion's average. Small samples are pulled toward the average (`smoothing_games`, 300), and each pick round's sample is pulled toward the augment's overall result. The shown win rate is that adjusted number, so BEST always has the highest one.
+
+Cut-offs: S+ ≥ +3.5%, S ≥ +2%, A ≥ +0.8%, B ≥ −1%, C ≥ −2.5%, D ≥ −4%, and F below that. Champions use the same idea against 50%.
+
+**Build fit** scores your items by their actual stats (Data Dragon); before you've bought anything it uses your champion's most common build. It's a rule of thumb, not a win rate: nobody publishes augment win rates split by build.
+
+## Build
+
+From WSL or Linux, with `rustup target add x86_64-pc-windows-gnu` and mingw-w64 installed:
+
+    cargo build --release --target x86_64-pc-windows-gnu
+    # target/x86_64-pc-windows-gnu/release/aram-mayhem.exe
+
+Test tools: `--demo <Champion> [round]` (fake champ select; scans whatever cards are on screen) and `--scan <Champion>` (one sweep, logged).
+
+## Windows Defender
+
+Defender's ML scanner has flagged this unsigned build as `Trojan:Win32/Bearfoos.A!ml`, a false positive. That's typical for fresh unsigned executables that capture the screen and register global hotkeys; Defender flagged Blitz too. The real fixes are code signing or [reporting the false positive to Microsoft](https://www.microsoft.com/en-us/wdsi/filesubmission). Allowing it on your own machine is your call.
