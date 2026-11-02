@@ -44,7 +44,7 @@ DEFAULTS = {
     "only_mayhem": True,
     "mayhem_queue_ids": [2400],
     # tiers: win-rate gain vs the champion's average (after sample-size smoothing)
-    "tier_cutoffs": {"S": 0.02, "A": 0.008, "B": -0.01, "C": -0.025},
+    "tier_cutoffs": {"S+": 0.035, "S": 0.02, "A": 0.008, "B": -0.01, "C": -0.025, "D": -0.04},
     "smoothing_games": 300,
     # card scanning
     "scan_cards": True,
@@ -209,7 +209,9 @@ def norm(text: str) -> str:
 # Screen rectangles the card scanner ignores: our own side panel lists augment names.
 OWN_WINDOWS: list[tuple[int, int, int, int]] = []
 
-TIER_COLORS = {"S": "#ff6b3d", "A": "#f5c518", "B": "#8ec441", "C": "#3aa0ff", "D": "#8a909a"}
+TIERS = ["S+", "S", "A", "B", "C", "D", "F"]  # best to worst; anything below D's cutoff is F
+TIER_COLORS = {"S+": "#ff4fa3", "S": "#ff6b3d", "A": "#f5c518", "B": "#8ec441",
+               "C": "#3aa0ff", "D": "#8a909a", "F": "#c43c3c"}
 RARITIES = [("kPrismatic", "Prismatic", "#e3b8ff"),
             ("kGold", "Gold", "#f5c518"),
             ("kSilver", "Silver", "#c3cad4")]
@@ -221,25 +223,27 @@ def champ_tiers(meta: dict, champ: dict, cid: int, cfg: dict) -> dict[int, dict]
     Small samples are pulled toward the average (smoothing_games of "average" games)
     so a 70% win rate over 40 games doesn't come out as S tier.
     """
-    cut, k = cfg["tier_cutoffs"], cfg["smoothing_games"]
+    cut = {**DEFAULTS["tier_cutoffs"], **cfg["tier_cutoffs"]}
+    k = cfg["smoothing_games"]
     base = meta["champs"].get(str(cid), {}).get("wr") or 0.5
 
     def tier(delta):
-        for t in ("S", "A", "B", "C"):
+        for t in TIERS[:-1]:
             if delta >= cut[t]:
                 return t
-        return "D"
+        return "F"
 
     out = {}
     for a in champ.get("poolAugments", []):
         g, wr = a.get("g", 0), a.get("wr", base)
         adj = (wr * g + base * k) / (g + k)
-        out[a["id"]] = {"tier": tier(adj - base), "wr": wr, "games": g}
+        out[a["id"]] = {"tier": tier(adj - base), "wr": wr, "games": g, "delta": adj - base}
     for aid, a in meta["augs"].items():  # not in this champion's data: use all-champion stats
         if int(aid) not in out and a.get("wr") is not None:
             g, wr = float(a.get("g") or 0), float(a["wr"])
             adj = (wr * g + 0.5 * k) / (g + k)
-            out[int(aid)] = {"tier": tier(adj - 0.5), "wr": wr, "games": int(g), "global": True}
+            out[int(aid)] = {"tier": tier(adj - 0.5), "wr": wr, "games": int(g),
+                             "delta": adj - 0.5, "global": True}
     return out
 
 
@@ -588,12 +592,12 @@ class CardScanner(threading.Thread):
         out = []
         for f in found:
             t = self.tiers.get(f["id"], {"tier": "?", "wr": None})
-            out.append({**f, "tier": t["tier"], "wr": t.get("wr"), "name": self.names.get(f["id"]),
-                        "global": t.get("global", False)})
-        ranked = [b for b in out if b["wr"] is not None]
-        if len(ranked) >= 2:
-            best = max(ranked, key=lambda b: ("SABCD?".index(b["tier"]) * -1, b["wr"]))
-            best["best"] = True
+            out.append({**f, "tier": t["tier"], "wr": t.get("wr"), "delta": t.get("delta"),
+                        "name": self.names.get(f["id"]), "global": t.get("global", False)})
+        ranked = sorted((b for b in out if b["delta"] is not None), key=lambda b: b["delta"])
+        if len(ranked) >= 2 and ranked[-1]["delta"] - ranked[0]["delta"] > 0.002:
+            ranked[-1]["tag"] = "BEST"
+            ranked[0]["tag"] = "WORST"
         log.info("cards: %s", ", ".join(f"{b['name']} {b['tier']}" for b in out))
         return out
 
@@ -903,18 +907,22 @@ class Overlay:
                 child.destroy()
             px = max(14, int(b["h"] * 0.85 * self.cfg["badge_scale"]))
             color = TIER_COLORS.get(b["tier"], DIM)
+            tag = b.get("tag")
             frame = tk.Frame(top, bg=BG, highlightthickness=2,
-                             highlightbackground="#ffffff" if b.get("best") else color)
+                             highlightbackground={"BEST": "#4ade80", "WORST": "#f87171"}.get(tag, color))
             frame.pack()
-            tk.Label(frame, text=b["tier"], bg=color, fg="#111111", padx=int(px * 0.45),
+            tk.Label(frame, text=b["tier"], bg=color, fg="#ffffff" if b["tier"] == "F" else "#111111",
+                     padx=int(px * 0.45),
                      font=("Segoe UI", -px, "bold")).pack(side="left")
             detail = f"{b['wr'] * 100:.1f}%" if b["wr"] is not None else "no data"
             if b.get("global"):
                 detail += " (all)"
-            if b.get("best"):
-                detail = "★ " + detail
             tk.Label(frame, text=detail, bg=BG, fg=FG, padx=int(px * 0.4),
                      font=("Segoe UI", -int(px * 0.75), "bold")).pack(side="left", fill="y")
+            if tag:
+                tk.Label(frame, text=tag, bg="#1f7a45" if tag == "BEST" else "#9b2c2c", fg="#ffffff",
+                         padx=int(px * 0.3), font=("Segoe UI", -int(px * 0.6), "bold")
+                         ).pack(side="left", fill="y")
             top.update_idletasks()
             w, h = top.winfo_reqwidth(), top.winfo_reqheight()
             x = int(b["x"] + b["w"] / 2 - w / 2)

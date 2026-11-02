@@ -3,7 +3,7 @@
 A small always-on-top panel for ARAM: Mayhem. It shows the best and worst augments for your champion in each rarity, then imports that champion's build into the client.
 
 - **Champ select:** the overlay appears when you lock or swap a champion. It writes a `[Mayhem] <Champion>` item set (core builds, boots and high-win-rate items) and sets your recommended summoner spells, keeping Flash on whichever key you already use.
-- **In game:** when the augment cards come up, each one gets a tier badge (**S/A/B/C/D**) with your champion's win rate on it, and the best option gets a ★. Rerolls update the badges straight away. Press **F8** to show or hide the full panel. The overlay is click-through and never takes focus from the game.
+- **In game:** when the augment cards come up, each one gets a tier badge (**S+ S A B C D F**) with your champion's win rate on it. The best and worst of the offered cards are tagged **BEST** and **WORST**. Rerolls update the badges straight away. Press **F8** to show or hide the full panel. The overlay is click-through and never takes focus from the game.
 - **Quit:** Ctrl+Shift+F8.
 
 It needs Windows Python 3.9+. The card badges also use Windows' built-in OCR engine, which needs one install:
@@ -44,6 +44,6 @@ Double-click `run.bat`, or run `pythonw aram_overlay.py`.
 - Stats come from [arammeta.com](https://arammeta.com) ([source, MIT](https://github.com/Lanternko/ARAM-Mayhem-Database)), built from Mayhem (queue 2400) match data. They are cached in `%LOCALAPPDATA%\AramOverlay\cache` for 12 hours, so each champion costs about one 90 KB request per day.
 - Log file: `%LOCALAPPDATA%\AramOverlay\overlay.log`.
 
-**Tiers** compare each augment's win rate on your champion with that champion's overall win rate. Small samples are first pulled toward the average (`smoothing_games`), so 40 lucky games can't make an augment S tier. Default cut-offs: S ≥ +2.0%, A ≥ +0.8%, B ≥ −1.0%, C ≥ −2.5%, and D below that. An augment with no data for your champion uses its all-champion win rate and is marked "(all)".
+**Tiers** compare each augment's win rate on your champion with that champion's overall win rate. Small samples are first pulled toward the average (`smoothing_games`), so 40 lucky games can't make an augment S tier. Default cut-offs: S+ ≥ +3.5%, S ≥ +2.0%, A ≥ +0.8%, B ≥ −1.0%, C ≥ −2.5%, D ≥ −4.0%, and F below that. That usually gives a handful of S+ and F augments per champion. BEST and WORST use the same smoothed number, so a tiny sample can't win BEST. An augment with no data for your champion uses its all-champion win rate and is marked "(all)".
 
 **Limits:** the card text must be in English, matching `ocr_language`. An augment missing from the current dataset, such as one that was just added, gets no badge.
