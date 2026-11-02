@@ -1,0 +1,27 @@
+{
+  "league_dir": "C:\\Riot Games\\League of Legends",
+  "data_url": "https://arammeta.com/api",
+  "cache_hours": 12,
+  "toggle_hotkey": "F8",
+  "quit_hotkey": "ctrl+shift+F8",
+  "augment_levels": [
+    3,
+    7,
+    11,
+    15
+  ],
+  "auto_show_seconds": 25,
+  "show_in_champ_select": true,
+  "import_item_set": true,
+  "set_summoner_spells": true,
+  "only_mayhem": true,
+  "mayhem_queue_ids": [
+    2400
+  ],
+  "per_rarity": 8,
+  "avoid_per_rarity": 3,
+  "x": -24,
+  "y": 140,
+  "opacity": 0.93,
+  "font_size": 10
+}
