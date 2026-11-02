@@ -194,6 +194,16 @@ class Data:
         newer = meta_file.stat().st_mtime - 60 if meta_file.exists() else 0.0
         return self._get(f"champions/{cid}.json", newer_than=newer)
 
+    def items(self) -> dict:
+        """Data Dragon item data (tags like SpellDamage/CriticalStrike) for build detection."""
+        version = self.meta().get("ddv", "latest")
+        path = self.dir / f"ddragon-items-{version}.json"
+        if not path.exists():
+            raw = _request(f"https://ddragon.leagueoflegends.com/cdn/{version}/data/en_US/item.json",
+                           timeout=15, local=False)
+            path.write_bytes(raw)
+        return json.loads(path.read_text("utf-8"))["data"]
+
     def find_champ(self, name: str) -> int | None:
         key = norm(name)
         for cid, c in self.meta()["champs"].items():
@@ -234,17 +244,96 @@ def champ_tiers(meta: dict, champ: dict, cid: int, cfg: dict) -> dict[int, dict]
         return "F"
 
     out = {}
-    for a in champ.get("poolAugments", []):
-        g, wr = a.get("g", 0), a.get("wr", base)
-        adj = (wr * g + base * k) / (g + k)
-        out[a["id"]] = {"tier": tier(adj - base), "wr": wr, "games": g, "delta": adj - base}
+    for rarity in champ.get("top", {}).values():  # the full pool, with per-round splits
+        for a in rarity:
+            g, wr = a.get("g", 0), a.get("wr", base)
+            delta = (wr - base) * g / (g + k)
+            rounds = []
+            for slot in a.get("slots") or []:
+                if not slot:  # no games recorded in this round
+                    rounds.append({"tier": tier(delta), "wr": base + delta, "delta": delta, "games": 0})
+                    continue
+                # pull each round's (smaller) sample toward the augment's overall result
+                sg = slot.get("g", 0)
+                rd = (slot.get("lift", 0.0) * sg + delta * k) / (sg + k)
+                round_base = slot.get("wr", wr) - slot.get("lift", 0.0)
+                rounds.append({"tier": tier(rd), "wr": round_base + rd, "delta": rd, "games": sg})
+            # shown win rates are sample-adjusted, so the ranking and the numbers agree
+            out[a["id"]] = {"tier": tier(delta), "wr": base + delta, "games": g, "delta": delta,
+                            "rounds": rounds}
+    for a in champ.get("poolAugments", []):  # older data files without per-round splits
+        if a["id"] not in out:
+            g, wr = a.get("g", 0), a.get("wr", base)
+            delta = (wr - base) * g / (g + k)
+            out[a["id"]] = {"tier": tier(delta), "wr": base + delta, "games": g, "delta": delta}
     for aid, a in meta["augs"].items():  # not in this champion's data: use all-champion stats
         if int(aid) not in out and a.get("wr") is not None:
             g, wr = float(a.get("g") or 0), float(a["wr"])
             adj = (wr * g + 0.5 * k) / (g + k)
-            out[int(aid)] = {"tier": tier(adj - 0.5), "wr": wr, "games": int(g),
+            out[int(aid)] = {"tier": tier(adj - 0.5), "wr": adj, "games": int(g),
                              "delta": adj - 0.5, "global": True}
     return out
+
+
+BUILD_CATS = ("ad", "ap", "crit", "tank", "support")
+CAT_ORDER = ("ap", "ad", "crit", "tank", "support", "cd", "amp", "gold", "mechanic", "other", "new")
+
+
+def build_profile(dd_items: dict, item_ids) -> tuple[set, int]:
+    """What a set of items is building toward: ({'ap', 'crit', ...}, ability-haste item count).
+
+    Scored from each item's stat amounts (not its tags: Statikk Shiv is tagged
+    SpellDamage but is an AD/crit item).
+    """
+    score = {c: 0.0 for c in BUILD_CATS}
+    haste = 0
+    for i in item_ids:
+        it = dd_items.get(str(i))
+        if not it:
+            continue
+        tags, cost = set(it.get("tags", [])), it.get("gold", {}).get("total", 0)
+        if tags & {"Boots", "Consumable", "Trinket"} or cost < 700:
+            continue
+        st = it.get("stats", {})
+        w = 1.0 if cost >= 1600 else 0.5  # components count half
+        ap = st.get("FlatMagicDamageMod", 0)
+        score["ap"] += w * ap / 90
+        score["ad"] += w * (st.get("FlatPhysicalDamageMod", 0) / 55
+                            + st.get("PercentAttackSpeedMod", 0) / 0.8)
+        score["crit"] += w * st.get("FlatCritChanceMod", 0) / 0.25
+        score["tank"] += w * (st.get("FlatHPPoolMod", 0) / 600 + st.get("FlatArmorMod", 0) / 60
+                              + st.get("FlatSpellBlockMod", 0) / 60)
+        if tags & {"GoldPer", "Aura"} or ("ManaRegen" in tags and ap <= 60):
+            score["support"] += w
+        if tags & {"AbilityHaste", "CooldownReduction"}:
+            haste += 1
+    top = max(score.values())
+    if top < 0.5:
+        return set(), haste
+    build = {c for c, v in score.items() if v >= top * 0.5}
+    if score["crit"] >= 0.75:  # any real crit investment makes crit augments worth it
+        build |= {"crit", "ad"}
+    return build, haste
+
+
+def augment_fit(cats: list, build: set, haste: int) -> tuple[str, list] | None:
+    """('fits' | 'off' | 'any', [category, ...]) for an augment against the current build."""
+    cats = [c for c in CAT_ORDER if c in cats]
+    if not cats:
+        return None
+    primary = [c for c in cats if c in BUILD_CATS]
+    if primary:
+        if not build:
+            return "any", primary
+        hit = [c for c in primary if c in build or (c == "ad" and "crit" in build)]
+        return ("fits", hit) if hit else ("off", primary)
+    if "cd" in cats and (haste >= 2 or "ap" in build):
+        return "fits", ["cd"]
+    if "amp" in cats and build:
+        damage = build & {"ad", "ap", "crit"}
+        return ("fits", ["amp"]) if damage else ("off", ["amp"])
+    rest = [c for c in cats if c != "new"] or cats
+    return "any", rest[:1]
 
 
 def build_view(meta: dict, champ: dict, cid: int, cfg: dict, tiers: dict) -> dict:
@@ -256,8 +345,9 @@ def build_view(meta: dict, champ: dict, cid: int, cfg: dict, tiers: dict) -> dic
         for a in entries:
             aug = augs.get(str(a["id"]))
             if aug:
-                out.append({"name": aug.get("name_en") or aug.get("name"), "wr": a["wr"],
-                            "tier": tiers.get(a["id"], {}).get("tier", "?"),
+                t = tiers.get(a["id"], {})
+                out.append({"name": aug.get("name_en") or aug.get("name"), "wr": t.get("wr", a["wr"]),
+                            "tier": t.get("tier", "?"),
                             "games": a.get("g", 0)})
             if len(out) >= n:
                 break
@@ -493,6 +583,11 @@ class CardScanner(threading.Thread):
         super().__init__(daemon=True)
         self.cfg, self.events = cfg, events
         self.mode = "off"  # off | slow | fast, set by the Worker
+        self.max_round = 1  # augment rounds unlocked by level, set by the Worker
+        self.picks = 0      # card screens seen and closed this game (= augments picked)
+        self.build: tuple[set, int] = (set(), 0)
+        self.cats: dict[int, list] = {}
+        self.cat_labels: dict[str, str] = {}
         self.matcher: Matcher | None = None
         self.tiers: dict[int, dict] = {}
         self.names: dict[int, str] = {}
@@ -503,7 +598,15 @@ class CardScanner(threading.Thread):
     def set_champion(self, meta: dict, tiers: dict):
         self.matcher = Matcher(meta)
         self.names = {int(k): v.get("name_en", k) for k, v in meta["augs"].items()}
+        self.cats = {int(k): v.get("cats", []) for k, v in meta["augs"].items()}
+        self.cat_labels = {k: v.get("en", k) for k, v in
+                           meta.get("augCategories", {}).get("labels", {}).items()}
         self.tiers = tiers
+
+    @property
+    def round(self) -> int:
+        """Which augment pick this is: picks already made + 1, capped by level unlocks."""
+        return max(1, min(self.picks + 1, self.max_round, 4))
 
     def _load_band(self, screen):
         try:
@@ -583,16 +686,25 @@ class CardScanner(threading.Thread):
             else:
                 misses += 1
                 if shown_key and misses >= 2:
-                    log.debug("cards gone")
+                    self.picks += 1
+                    log.info("cards closed (pick %s made)", self.picks)
                     shown_key = None
                     self.events.put(("badges", []))
             time.sleep(max(0.05, interval - (time.time() - t0)))
 
     def badges(self, found: list[dict]) -> list[dict]:
         out = []
+        rnd = self.round
+        build, haste = self.build
         for f in found:
             t = self.tiers.get(f["id"], {"tier": "?", "wr": None})
+            rounds = t.get("rounds") or []
+            if len(rounds) >= rnd:
+                t = {**t, **rounds[rnd - 1]}
+            fit = augment_fit(self.cats.get(f["id"], []), build, haste)
             out.append({**f, "tier": t["tier"], "wr": t.get("wr"), "delta": t.get("delta"),
+                        "round": rnd if len(rounds) >= rnd else None,
+                        "fit": fit and (fit[0], [self.cat_labels.get(c, c) for c in fit[1]]),
                         "name": self.names.get(f["id"]), "global": t.get("global", False)})
         ranked = sorted((b for b in out if b["delta"] is not None), key=lambda b: b["delta"])
         if len(ranked) >= 2 and ranked[-1]["delta"] - ranked[0]["delta"] > 0.002:
@@ -620,7 +732,12 @@ class Worker(threading.Thread):
         self.level = None
         self.mayhem = None
         self.game_seen = False
+        self.expected_items: list[int] = []
+        self.build_key = None
         self.set_scan("off")
+        if self.scanner:
+            self.scanner.picks = 0
+            self.scanner.max_round = 1
 
     def set_scan(self, mode):
         if self.scanner:
@@ -677,6 +794,8 @@ class Worker(threading.Thread):
     def load(self, cid: int, show: bool, me: dict | None = None):
         meta, champ = self.data.meta(), self.data.champ(cid)
         tiers = champ_tiers(meta, champ, cid, self.cfg)
+        groups = champ.get("itemClusters", {}).get("groups", [])
+        self.expected_items = [x["id"] for x in groups[0]["core"]] if groups else []
         if self.scanner:
             self.scanner.set_champion(meta, tiers)
         self.emit("view", build_view(meta, champ, cid, self.cfg, tiers))
@@ -699,6 +818,27 @@ class Worker(threading.Thread):
                 notes.append("spells ✓" if ok else "spells ✗")
         if notes:
             self.emit("status", "Imported: " + ", ".join(notes))
+
+    def update_build(self, item_ids: list):
+        """Work out what we're building (or expect to build, before items) for the fit tags."""
+        try:
+            dd = self.data.items()
+        except (OSError, ValueError) as e:
+            log.warning("item data unavailable: %s", e)
+            return
+        build, haste = build_profile(dd, item_ids)
+        source = "items"
+        if not build:
+            build, haste = build_profile(dd, self.expected_items)
+            source = "expected"
+        self.scanner.build = (build, haste)
+        key = (tuple(sorted(build)), source)
+        if key != self.build_key:
+            self.build_key = key
+            labels = [self.scanner.cat_labels.get(c, c) for c in CAT_ORDER if c in build]
+            log.info("build (%s): %s", source, labels)
+            self.emit("build", f"Build{' (expected)' if source == 'expected' else ''}: "
+                               + (" + ".join(labels) or "unknown"))
 
     def import_item_set(self, item_set: dict) -> bool:
         me = self.lcu.get("/lol-summoner/v1/current-summoner")
@@ -731,6 +871,11 @@ class Worker(threading.Thread):
         game_time = (live("gamestats") or {}).get("gameTime", 0)
         dead = bool((mine or {}).get("isDead"))
         self.set_scan("fast" if dead or game_time < 150 else "slow")
+        level = (live("activeplayer") or {}).get("level") or 1
+        if self.scanner:
+            unlocked = sum(1 for lv in self.cfg["augment_levels"] if level >= lv)
+            self.scanner.max_round = max(1, unlocked)
+            self.update_build([i.get("itemID") for i in (mine or {}).get("items", [])])
 
         if self.scanner and self.scanner.error is None:
             return  # cards get badges directly; no need to pop the panel
@@ -835,6 +980,7 @@ class Overlay:
                              highlightthickness=1, highlightbackground="#2a3340")
         self.body.pack()
         self.status = "Waiting for champ select…"
+        self.build_label = ""
         self.view = None
         self.hide_job = None
         OverlayWindow.hide_from_capture = cfg["hide_from_capture"]
@@ -864,6 +1010,9 @@ class Overlay:
                     self.render()
                 elif kind == "status":
                     self.status = args[0]
+                    self.render()
+                elif kind == "build":
+                    self.build_label = args[0]
                     self.render()
                 elif kind == "badges":
                     self.show_badges(args[0])
@@ -908,13 +1057,17 @@ class Overlay:
             px = max(14, int(b["h"] * 0.85 * self.cfg["badge_scale"]))
             color = TIER_COLORS.get(b["tier"], DIM)
             tag = b.get("tag")
-            frame = tk.Frame(top, bg=BG, highlightthickness=2,
+            outer = tk.Frame(top, bg=BG, highlightthickness=2,
                              highlightbackground={"BEST": "#4ade80", "WORST": "#f87171"}.get(tag, color))
-            frame.pack()
+            outer.pack()
+            frame = tk.Frame(outer, bg=BG)
+            frame.pack(fill="x")
             tk.Label(frame, text=b["tier"], bg=color, fg="#ffffff" if b["tier"] == "F" else "#111111",
                      padx=int(px * 0.45),
                      font=("Segoe UI", -px, "bold")).pack(side="left")
             detail = f"{b['wr'] * 100:.1f}%" if b["wr"] is not None else "no data"
+            if b.get("round"):
+                detail = f"R{b['round']}  {detail}"
             if b.get("global"):
                 detail += " (all)"
             tk.Label(frame, text=detail, bg=BG, fg=FG, padx=int(px * 0.4),
@@ -923,6 +1076,12 @@ class Overlay:
                 tk.Label(frame, text=tag, bg="#1f7a45" if tag == "BEST" else "#9b2c2c", fg="#ffffff",
                          padx=int(px * 0.3), font=("Segoe UI", -int(px * 0.6), "bold")
                          ).pack(side="left", fill="y")
+            if b.get("fit"):
+                kind, cats = b["fit"]
+                text, fg = {"fits": ("✓ FITS BUILD", "#4ade80"), "off": ("✗ OFF-BUILD", "#fb923c"),
+                            "any": ("• ANY BUILD", DIM)}[kind]
+                tk.Label(outer, text=f"{text} · {' / '.join(cats)}", bg="#0b0e13", fg=fg,
+                         font=("Segoe UI", -int(px * 0.6), "bold")).pack(fill="x")
             top.update_idletasks()
             w, h = top.winfo_reqwidth(), top.winfo_reqheight()
             x = int(b["x"] + b["w"] / 2 - w / 2)
@@ -992,6 +1151,8 @@ class Overlay:
             self.label(info, "Spells/boots: ", DIM, -1, row=r, column=0, sticky="w")
             self.label(info, extras, size=-1, row=r, column=1, sticky="w")
         hot = f"{self.cfg['toggle_hotkey']} show/hide · {self.status} · data: arammeta.com"
+        if self.build_label:
+            hot = f"{self.build_label} · {hot}"
         self.label(self.body, hot, DIM, -2, row=3, column=0, sticky="w", pady=(6, 0))
         self._place()
 
@@ -1073,6 +1234,13 @@ def main():
         if scanner:
             scanner.set_champion(meta, tiers)
             scanner.mode = "fast"
+            cid = data.find_champ(champ_name)
+            groups = data.champ(cid).get("itemClusters", {}).get("groups", [])
+            scanner.build = build_profile(data.items(), [x["id"] for x in groups[0]["core"]] if groups else [])
+            scanner.max_round = scanner.picks = int(os.environ.get("ARAM_DEMO_ROUND", "1"))
+            scanner.picks -= 1
+            labels = [scanner.cat_labels.get(c, c) for c in CAT_ORDER if c in scanner.build[0]]
+            events.put(("build", "Build (expected): " + " + ".join(labels)))
         events.put(("view", view))
         events.put(("status", "demo mode"))
         events.put(("show",))

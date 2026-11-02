@@ -3,7 +3,10 @@
 A small always-on-top panel for ARAM: Mayhem. It shows the best and worst augments for your champion in each rarity, then imports that champion's build into the client.
 
 - **Champ select:** the overlay appears when you lock or swap a champion. It writes a `[Mayhem] <Champion>` item set (core builds, boots and high-win-rate items) and sets your recommended summoner spells, keeping Flash on whichever key you already use.
-- **In game:** when the augment cards come up, each one gets a tier badge (**S+ S A B C D F**) with your champion's win rate on it. The best and worst of the offered cards are tagged **BEST** and **WORST**. Rerolls update the badges straight away. Press **F8** to show or hide the full panel. The overlay is click-through and never takes focus from the game.
+- **In game:** when the augment cards come up, each one gets a badge showing:
+  - **Tier and win rate** (**S+ S A B C D F**) for your champion, at the pick round you're on (R1 to R4). An augment can be great as a first pick and mediocre as a fourth.
+  - **BEST / WORST** among the offered cards.
+  - **Build fit** with the augment's category: **✓ FITS BUILD · AP**, **✗ OFF-BUILD · Crit** or **• ANY BUILD · Economy**. Your build is worked out from your items. Before you've bought anything, it uses your champion's most common build; the panel footer shows which. Rerolls update the badges straight away. Press **F8** to show or hide the full panel. The overlay is click-through and never takes focus from the game.
 - **Quit:** Ctrl+Shift+F8.
 
 It needs Windows Python 3.9+. The card badges also use Windows' built-in OCR engine, which needs one install:
@@ -45,5 +48,11 @@ Double-click `run.bat`, or run `pythonw aram_overlay.py`.
 - Log file: `%LOCALAPPDATA%\AramOverlay\overlay.log`.
 
 **Tiers** compare each augment's win rate on your champion with that champion's overall win rate. Small samples are first pulled toward the average (`smoothing_games`), so 40 lucky games can't make an augment S tier. Default cut-offs: S+ ≥ +3.5%, S ≥ +2.0%, A ≥ +0.8%, B ≥ −1.0%, C ≥ −2.5%, D ≥ −4.0%, and F below that. That usually gives a handful of S+ and F augments per champion. BEST and WORST use the same smoothed number, so a tiny sample can't win BEST. An augment with no data for your champion uses its all-champion win rate and is marked "(all)".
+
+**Win rates shown** are sample-adjusted, the same number that sets the tier, so BEST always has the highest number. Each pick round's win rate is pulled toward the augment's overall result, because each round has only about a quarter of the games.
+
+**Pick round** is the number of card screens you've closed this game plus one, capped by the levels you've reached (3/7/11/15).
+
+**Build fit** scores your items by their actual stats from Riot's Data Dragon: AP, AD and attack speed, crit, health and resistances, and support items (mana regen, auras). Augment categories come from arammeta. Damage-amp augments count as off-build on tank and support builds. Cooldown augments fit AP or high-haste builds. Anything else is "any build". This tag is a rule of thumb, not a win rate: nobody publishes augment win rates split by build.
 
 **Limits:** the card text must be in English, matching `ocr_language`. An augment missing from the current dataset, such as one that was just added, gets no badge.
