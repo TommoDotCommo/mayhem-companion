@@ -672,9 +672,10 @@ impl Scanner {
                     self.relic_absent[k] = 0;
                 }
                 None => {
-                    // no timer in that slot on two reads in a row: it's up
+                    // no timer in that slot for ~1 s of reads while others were read: it's up
+                    // (one or two misses are OCR flicker, not a respawn)
                     self.relic_absent[k] = self.relic_absent[k].saturating_add(1);
-                    if self.relic_absent[k] >= 2 && c.ready_at[k] > now {
+                    if self.relic_absent[k] >= 4 && c.ready_at[k] > now {
                         c.ready_at[k] = now;
                     }
                 }
