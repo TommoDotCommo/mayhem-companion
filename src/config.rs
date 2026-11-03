@@ -61,8 +61,7 @@ pub struct Config {
     pub relic_first_outer: f64,
     pub relic_first_inner: f64,
     pub relic_respawn: f64,
-    /// Seconds between pickup and the respawn timer starting (0: in Mayhem the 90 s count
-    /// from the pickup).
+    /// Seconds between pickup and the heal beam landing: the 90 s respawn counts from there.
     pub relic_beam_delay: f64,
     /// Hotkeys to mark a relic taken, in scoreboard order: blue inner, blue outer,
     /// red outer, red inner. Press again within 3 s to undo.
@@ -106,7 +105,7 @@ impl Default for Config {
             relic_first_outer: 105.0,
             relic_first_inner: 150.0,
             relic_respawn: 90.0,
-            relic_beam_delay: 0.0,
+            relic_beam_delay: 2.5,
             relic_hotkeys: vec!["alt+1".into(), "alt+2".into(), "alt+3".into(), "alt+4".into()],
             scoreboard_key: "tab".into(),
             relic_minimap: None,
