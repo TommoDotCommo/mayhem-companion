@@ -77,6 +77,8 @@ pub struct Meta {
     pub item_lut: HashMap<String, ItemLut>,
     pub patch_prefix: String,
     pub ddv: String,
+    pub min_games_per_pair: f64,
+    pub recommendation_composition: CompositionRules,
     #[serde(rename = "patchChanges")]
     pub patch_changes: PatchChanges,
 }
@@ -86,6 +88,50 @@ pub struct Meta {
 pub struct PatchChanges {
     #[serde(rename = "currentGames")]
     pub current_games: f64,
+    #[serde(rename = "currentPatch")]
+    pub current_patch: String,
+    #[serde(rename = "baselinePatch")]
+    pub baseline_patch: String,
+    #[serde(rename = "baselineGames")]
+    pub baseline_games: f64,
+    #[serde(rename = "heroRisers")]
+    pub hero_risers: Vec<PatchChange>,
+    #[serde(rename = "heroFallers")]
+    pub hero_fallers: Vec<PatchChange>,
+    #[serde(rename = "itemRisers")]
+    pub item_risers: Vec<PatchChange>,
+    #[serde(rename = "itemFallers")]
+    pub item_fallers: Vec<PatchChange>,
+    #[serde(rename = "augmentRisers")]
+    pub augment_risers: Vec<PatchChange>,
+    #[serde(rename = "augmentFallers")]
+    pub augment_fallers: Vec<PatchChange>,
+}
+
+#[derive(Debug, Default, Deserialize, Clone)]
+#[serde(default)]
+pub struct PatchChange {
+    pub id: u32,
+    pub name_en: String,
+    pub current_wr: f64,
+    pub baseline_wr: f64,
+    pub delta: f64,
+    pub current_games: f64,
+    pub baseline_games: f64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct CompositionRules {
+    pub lack_thresholds: HashMap<String, f64>,
+}
+
+#[derive(Debug, Default, Deserialize, Clone)]
+#[serde(default)]
+pub struct ChampionPair {
+    pub id: u32,
+    pub g: f64,
+    pub lift: f64,
 }
 
 #[derive(Debug, Default, Deserialize, Clone)]
@@ -95,6 +141,8 @@ pub struct ChampInfo {
     pub alias: String,
     pub image: String,
     pub tags: Vec<String>,
+    pub pairs: Vec<ChampionPair>,
+    pub comp: HashMap<String, f64>,
     pub wr: f64,
     pub g: f64,
 }

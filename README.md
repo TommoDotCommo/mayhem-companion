@@ -17,8 +17,11 @@ An unofficial helper for League of Legends **ARAM: Mayhem**. It's a native Windo
   - Holding **Tab** syncs all four timers from the game's own scoreboard.
   - Timers turn yellow for their last 10 seconds. **Alt+1–4** marks a relic taken by hand (press again within 3 s to undo).
 - **Champ select.** The companion window opens with your pick, bench and team, each with a tier and win rate. The bench shows the win-rate gap against your pick; you swap with one click, and you can reroll from there.
-  - Your builds are imported as `[Mayhem]` item sets, one page per build style.
+  - Your builds are imported as `[Mayhem]` item sets and placed first. Choose one page per build style or all builds on one page in **Settings**. Recognised tool builds for your current champion (Blitz, Porofessor, Mobalytics, U.GG, OP.GG and others) can be replaced; personal builds and builds for other champions or maps are kept.
   - Your summoner spells are set, keeping Flash on the key you already use.
+- **Team-aware bench recommendations.** Bench picks are ordered by champion strength, reliable teammate pairings, role gaps and damage balance. Hover a pick to see the score and reasons; fit points are a heuristic, not predicted win probability. Champion win rates remain visible separately.
+- **Personal match history.** The **History** tab imports your recent Mayhem matches from the running League client and keeps them locally, with results, KDA, champion damage, final items and augments. Filter by champion or patch and compare your own champion, item and augment results. Accounts are stored separately using an opaque account key; no other players' identities or statistics are saved. The app checks the latest 40 matches on connection and about once a minute while outside a game or champion select, and retries incomplete results. Saved history accumulates across sessions and remains available offline. Small personal samples describe your results and do not establish an item's or augment's independent effect.
+- **Patch-change summaries.** The **Patch Changes** tab compares champions, augments and items with the previous patch, showing rising and falling win rates, percentage-point changes, and sample sizes. These are observed statistical trends, rather than a list of balance edits.
 - **Champion pages.**
   - **Balance changes:** ARAM and Mayhem balance changes appear as green (buff) and red (nerf) chips, combined the way the game applies them, with Mayhem's ability changes on hover.
   - **Builds:** one card per build style. Each win rate is coloured against the champion's average, with tags for the highest win rate and the most played.
@@ -45,12 +48,19 @@ An unofficial helper for League of Legends **ARAM: Mayhem**. It's a native Windo
 | **Alt+1–4** | relic taken: blue inner, blue outer, red outer, red inner |
 | Tray icon | left-click opens the companion; right-click offers *Start with Windows* and *Quit* |
 
-Settings live in `%LOCALAPPDATA%\AramOverlay\config.json` (created on first run). The log is `overlay.log` in the same folder.
+Open the **Settings** tab to keep the companion open while playing, choose how item builds are grouped, and control automatic updates. Changes save immediately and apply to the running service; changing build settings in champion select reimports your builds.
+
+App updates are checked on startup and every six hours by default. The app downloads the latest stable GitHub release and verifies its SHA-256 digest. To install a downloaded update, **Quit** from the tray and open the app again. The previous executable is kept as `.previous`; installation errors are recorded in `%LOCALAPPDATA%\AramOverlay\updates\install-error.txt`. Updates require a writable app folder. Use **Check for app updates** for a manual check.
+
+ARAM data refreshes automatically every 12 hours while the app stays open, including new data published during the same patch. **Refresh ARAM data now** forces a refresh. Both update options can be disabled independently, and cached data stays available when offline.
+
+Settings live in `%LOCALAPPDATA%\AramOverlay\config.json` (created on first run). The log is `overlay.log` in the same folder. Personal match history lives in the `history` subfolder.
 
 ## Privacy and fair play
 
-- Everything runs on your PC. It reads the League client's local API (champ select, item sets), the game's local Live Client Data API (your level, items, game clock), and small parts of your screen: card titles, the minimap's relic area, and the scoreboard's relic timers while Tab is held. Screen captures are processed in memory with Windows' built-in text recognition and never saved or sent anywhere.
-- The only network requests download public statistics from arammeta.com, Data Dragon and the League of Legends Wiki.
+- Everything runs on your PC. It reads the League client's local API (champ select, item sets, your match history), the game's local Live Client Data API (your level, items, game clock), and small parts of your screen: card titles, the minimap's relic area, and the scoreboard's relic timers while Tab is held. Screen captures are processed in memory with Windows' built-in text recognition and never saved or sent anywhere.
+- Personal results are stored locally and never uploaded. Account identifiers are hashed before storage, and names and other players' results are discarded.
+- Network requests download public statistics from arammeta.com, Data Dragon and the League of Legends Wiki, and app release metadata and updates from GitHub.
 - It doesn't read game memory, automate input, or show anything about enemies that the game itself doesn't show you. Relic timers are neutral objectives the game already displays on the scoreboard.
 
 ## Data and credits
@@ -82,8 +92,7 @@ mayhem-companion.exe  (service, ~45 MB, always on)
 └─ ipc       127.0.0.1 JSON lines → companion
 
 mayhem-companion.exe --companion  (egui, GPU-rendered; repaints only on change)
-   Opens for champ select and closes when the game starts, so its GPU memory
-   is only paid while it's useful.
+   Opens for champ select; optionally stays open during games (Settings).
 ```
 
 **Measured** (2560×1440):
@@ -108,7 +117,7 @@ From WSL or Linux, with `rustup target add x86_64-pc-windows-gnu` and mingw-w64 
 
     cargo build --release --target x86_64-pc-windows-gnu
 
-Tests: `cargo test`. Releases: push a version tag (`git tag v0.3.1 && git push origin v0.3.1`) and GitHub builds and publishes the exe. Debug tools: `--demo <Champion> [round]` (fake champ select), `--scan <Champion>` (one screen sweep, logged), `--render <in.png> <out.png> <Champion>` (draws the overlay onto a screenshot), and `--balance` (logs balance data). Set the `ARAM_DEBUG` environment variable for debug logging, plus pictures of what the relic watch saw.
+Tests: `cargo test` on Windows, or `cargo test --lib` for portable rating and item-set tests on Linux. Releases: push a version tag (`git tag v0.4.0 && git push origin v0.4.0`) and GitHub builds and publishes the exe. Debug tools: `--demo <Champion> [round]` (fake champ select), `--scan <Champion>` (one screen sweep, logged), `--render <in.png> <out.png> <Champion>` (draws the overlay onto a screenshot), and `--balance` (logs balance data). Set the `ARAM_DEBUG` environment variable for debug logging, plus pictures of what the relic watch saw.
 
 ## Licence
 

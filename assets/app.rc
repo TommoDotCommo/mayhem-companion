@@ -2,8 +2,8 @@
 1 ICON "app.ico"
 1 24 "app.manifest"
 1 VERSIONINFO
-FILEVERSION 0,3,0,0
-PRODUCTVERSION 0,3,0,0
+FILEVERSION 0,4,0,0
+PRODUCTVERSION 0,4,0,0
 FILEOS VOS_NT_WINDOWS32
 FILETYPE VFT_APP
 BEGIN
@@ -13,12 +13,12 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "Mayhem Companion (open source)"
       VALUE "FileDescription", "Mayhem Companion (unofficial ARAM: Mayhem helper)"
-      VALUE "FileVersion", "0.3.0"
+      VALUE "FileVersion", "0.4.0"
       VALUE "InternalName", "mayhem-companion"
       VALUE "LegalCopyright", "MIT licence. Not endorsed by Riot Games."
       VALUE "OriginalFilename", "mayhem-companion.exe"
       VALUE "ProductName", "Mayhem Companion"
-      VALUE "ProductVersion", "0.3.0"
+      VALUE "ProductVersion", "0.4.0"
     END
   END
   BLOCK "VarFileInfo"

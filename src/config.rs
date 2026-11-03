@@ -34,6 +34,10 @@ pub struct Config {
     pub companion_hotkey: String,
     pub quit_hotkey: String,
     pub import_item_set: bool,
+    pub combined_item_sets: bool,
+    pub replace_tool_builds: bool,
+    pub auto_update_app: bool,
+    pub auto_update_data: bool,
     pub set_summoner_spells: bool,
     pub open_companion_in_champ_select: bool,
     pub close_companion_in_game: bool,
@@ -82,12 +86,30 @@ impl Default for Config {
             companion_hotkey: "F7".into(),
             quit_hotkey: "ctrl+shift+F8".into(),
             import_item_set: true,
+            combined_item_sets: false,
+            replace_tool_builds: true,
+            auto_update_app: true,
+            auto_update_data: true,
             set_summoner_spells: true,
             open_companion_in_champ_select: true,
             close_companion_in_game: true,
             mayhem_queue_ids: vec![2400],
-            tier_cutoffs: Cutoffs { s_plus: 0.035, s: 0.02, a: 0.008, b: -0.01, c: -0.025, d: -0.04 },
-            champion_tier_cutoffs: Cutoffs { s_plus: 0.05, s: 0.03, a: 0.012, b: -0.01, c: -0.025, d: -0.04 },
+            tier_cutoffs: Cutoffs {
+                s_plus: 0.035,
+                s: 0.02,
+                a: 0.008,
+                b: -0.01,
+                c: -0.025,
+                d: -0.04,
+            },
+            champion_tier_cutoffs: Cutoffs {
+                s_plus: 0.05,
+                s: 0.03,
+                a: 0.012,
+                b: -0.01,
+                c: -0.025,
+                d: -0.04,
+            },
             smoothing_games: 300.0,
             champion_smoothing_games: 2000.0,
             scan_cards: true,
@@ -114,6 +136,14 @@ impl Default for Config {
 }
 
 impl Config {
+    pub fn save(&self) -> Result<(), String> {
+        std::fs::create_dir_all(data_dir()).map_err(|e| e.to_string())?;
+        let bytes = serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?;
+        let tmp = data_dir().join(format!("config-{}.tmp", std::process::id()));
+        std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
+        std::fs::rename(tmp, data_dir().join("config.json")).map_err(|e| e.to_string())
+    }
+
     /// Load `config.json` from the data dir, creating it with defaults on first run.
     pub fn load() -> Config {
         let path = data_dir().join("config.json");

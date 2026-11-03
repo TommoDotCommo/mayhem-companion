@@ -10,7 +10,7 @@ use crate::state::*;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
-use std::sync::Arc;
+use std::sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}};
 use std::time::{Duration, Instant};
 
 pub enum Msg {
@@ -18,7 +18,7 @@ pub enum Msg {
     Ui(UiCmd),
 }
 
-const TAG: &str = "[Mayhem]";
+use crate::item_sets::{make_item_sets, merge_item_sets};
 
 pub struct Engine {
     cfg: Config,
@@ -44,6 +44,9 @@ pub struct Engine {
     relics_saved: [f64; 4],
     hide_panel_at: Option<Instant>,
     next_live: Instant,
+    next_history: Instant,
+    history_busy: Arc<AtomicBool>,
+    history_epoch: Arc<AtomicU64>,
 }
 
 fn u32_of(v: &Value) -> u32 {
@@ -73,17 +76,28 @@ impl Engine {
             relics_saved: [0.0; 4],
             hide_panel_at: None,
             next_live: Instant::now(),
+            next_history: Instant::now(),
+            history_busy: Arc::new(AtomicBool::new(false)),
+            history_epoch: Arc::new(AtomicU64::new(0)),
         }
     }
 
     pub fn run(mut self, rx: Receiver<Msg>) {
         loop {
-            let wait = if self.in_game() { Duration::from_millis(250) } else { Duration::from_secs(5) };
+            let wait = if self.in_game() {
+                Duration::from_millis(250)
+            } else {
+                Duration::from_secs(5)
+            };
             match rx.recv_timeout(wait) {
                 Ok(Msg::Lcu(e)) => self.on_lcu(e),
                 Ok(Msg::Ui(c)) => self.on_ui(c),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return,
+            }
+            if self.lcu.is_some() && !matches!(self.phase.as_str(), "ChampSelect" | "GameStart" | "InProgress" | "Reconnect") && Instant::now() >= self.next_history {
+                self.next_history = Instant::now() + Duration::from_secs(60);
+                self.sync_history();
             }
             if self.in_game() && Instant::now() >= self.next_live {
                 self.next_live = Instant::now() + Duration::from_secs(1);
@@ -94,6 +108,46 @@ impl Engine {
                 self.overlay.send(OverlayCmd::PanelVisible(Some(false)));
             }
         }
+    }
+
+    fn sync_history(&self) {
+        let Some(lcu) = self.lcu.clone() else { return };
+        if self.history_busy.swap(true, Ordering::SeqCst) { return; }
+        let busy = self.history_busy.clone();
+        let epoch = self.history_epoch.clone();
+        let generation = epoch.load(Ordering::SeqCst);
+        let shared = self.shared.clone();
+        let queues = self.cfg.mayhem_queue_ids.clone();
+        shared.write().unwrap().history_status = "Importing recent Mayhem matches…".into();
+        repaint();
+        std::thread::spawn(move || {
+            let result = crate::history::sync(&crate::config::data_dir().join("history"), &queues,
+                |path| lcu.get(path).ok_or_else(|| "League match history is unavailable; the app will retry".into()),
+                |account| {
+                    if epoch.load(Ordering::SeqCst) == generation {
+                        let mut s = shared.write().unwrap();
+                        if s.history_account != account {
+                            s.history_account = account.into();
+                            s.history_revision += 1;
+                        }
+                        drop(s);
+                        repaint();
+                    }
+                });
+            if epoch.load(Ordering::SeqCst) == generation {
+                let mut s = shared.write().unwrap();
+                match result {
+                    Ok(result) => {
+                        if s.history_account != result.account || result.added > 0 { s.history_revision += 1; }
+                        s.history_account = result.account;
+                        s.history_status = format!("{} saved matches · {} imported · {} awaiting details", result.games, result.added, result.unavailable);
+                    }
+                    Err(e) => s.history_status = format!("History sync: {e}"),
+                }
+            }
+            busy.store(false, Ordering::SeqCst);
+            repaint();
+        });
     }
 
     fn in_game(&self) -> bool {
@@ -112,11 +166,14 @@ impl Engine {
     fn on_lcu(&mut self, e: LcuEvent) {
         match e {
             LcuEvent::Connected(l) => {
+                self.history_epoch.fetch_add(1, Ordering::SeqCst);
+                self.next_history = Instant::now();
                 self.lcu = Some(l);
                 self.shared.write().unwrap().client = Client::Connected;
                 repaint();
             }
             LcuEvent::Disconnected => {
+                self.history_epoch.fetch_add(1, Ordering::SeqCst);
                 self.lcu = None;
                 self.phase.clear();
                 self.mayhem = None;
@@ -156,6 +213,7 @@ impl Engine {
         }
         log::info!("phase {} -> {p}", self.phase);
         self.phase = p.clone();
+        if matches!(p.as_str(), "EndOfGame" | "PreEndOfGame" | "WaitingForStats") { self.next_history = Instant::now(); }
         self.shared.write().unwrap().phase = p.clone();
         match p.as_str() {
             "ChampSelect" | "GameStart" | "InProgress" | "Reconnect" => {
@@ -218,7 +276,12 @@ impl Engine {
         self.spells = me.map(|p| (u32_of(&p["spell1Id"]), u32_of(&p["spell2Id"]))).unwrap_or((0, 0));
         let bench: Vec<u32> = s["benchChampions"]
             .as_array()
-            .map(|b| b.iter().map(|c| if c.is_object() { u32_of(&c["championId"]) } else { u32_of(c) }).filter(|c| *c > 0).collect())
+            .map(|b| {
+                b.iter()
+                    .map(|c| if c.is_object() { u32_of(&c["championId"]) } else { u32_of(c) })
+                    .filter(|c| *c > 0)
+                    .collect()
+            })
             .unwrap_or_default();
         let teammates: Vec<u32> = team
             .iter()
@@ -262,7 +325,12 @@ impl Engine {
             }
         };
         let ratings = Arc::new(champ_ratings(&meta, &detail, cid, &self.cfg));
-        self.expected_items = detail.clusters.groups.first().map(|g| g.core.iter().map(|i| i.id).collect()).unwrap_or_default();
+        self.expected_items = detail
+            .clusters
+            .groups
+            .first()
+            .map(|g| g.core.iter().map(|i| i.id).collect())
+            .unwrap_or_default();
         {
             let mut c = self.scan.lock().unwrap();
             c.meta = Some(meta.clone());
@@ -278,8 +346,8 @@ impl Engine {
         let Some(lcu) = &self.lcu else { return };
         let mut notes: Vec<String> = vec![];
         if self.cfg.import_item_set {
-            let sets = make_item_sets(meta, detail, cid, prefer_cluster);
-            let ok = !sets.is_empty() && import_item_sets(lcu, &sets);
+            let sets = make_item_sets(meta, detail, cid, prefer_cluster, self.cfg.combined_item_sets);
+            let ok = !sets.is_empty() && import_item_sets(lcu, &sets, cid, self.cfg.replace_tool_builds);
             notes.push(if !ok {
                 "item sets ✗".to_string()
             } else if sets.len() == 1 {
@@ -289,12 +357,21 @@ impl Engine {
             });
         }
         if self.cfg.set_summoner_spells && prefer_cluster.is_none() {
-            let want: Vec<u32> = detail.spells.top.first().map(|s| s.items.iter().map(|i| i.id).collect()).unwrap_or_default();
+            let want: Vec<u32> = detail
+                .spells
+                .top
+                .first()
+                .map(|s| s.items.iter().map(|i| i.id).collect())
+                .unwrap_or_default();
             if want.len() == 2 {
                 match pick_spell_slots(self.spells, &want) {
                     None => notes.push("spells ✓".into()),
                     Some((a, b)) => {
-                        let ok = lcu.send("PATCH", "/lol-champ-select/v1/session/my-selection", Some(&json!({"spell1Id": a, "spell2Id": b})));
+                        let ok = lcu.send(
+                            "PATCH",
+                            "/lol-champ-select/v1/session/my-selection",
+                            Some(&json!({"spell1Id": a, "spell2Id": b})),
+                        );
                         notes.push(if ok { "spells ✓" } else { "spells ✗" }.into());
                     }
                 }
@@ -351,13 +428,56 @@ impl Engine {
             ),
             cols,
             builds,
-            footer: format!("{} hide · {} companion · data: arammeta.com", self.cfg.panel_hotkey, self.cfg.companion_hotkey),
+            footer: format!(
+                "{} hide · {} companion · data: arammeta.com",
+                self.cfg.panel_hotkey, self.cfg.companion_hotkey
+            ),
         }
     }
 
     // ------------------------------------------------------------------ companion commands
 
     fn on_ui(&mut self, cmd: UiCmd) {
+        match cmd {
+            UiCmd::ReloadSettings => {
+                let was_auto = self.cfg.auto_update_app;
+                self.cfg = Config::load();
+                if self.cfg.auto_update_app && !was_auto { crate::updates::check_async(self.shared.clone()); }
+                if self.phase == "ChampSelect" {
+                    if let Some(cid) = self.imported {
+                        self.on_my_champ(cid, true, None);
+                    }
+                }
+                self.status("Settings saved");
+                return;
+            }
+            UiCmd::SyncHistory => {
+                if matches!(self.phase.as_str(), "ChampSelect" | "GameStart" | "InProgress" | "Reconnect") {
+                    self.shared.write().unwrap().history_status = "History sync resumes after the game".into();
+                    repaint();
+                } else if self.lcu.is_some() { self.sync_history(); }
+                else { self.shared.write().unwrap().history_status = "Open League to import recent Mayhem matches".into(); repaint(); }
+                return;
+            }
+            UiCmd::CheckUpdates => {
+                crate::updates::check_async(self.shared.clone());
+                return;
+            }
+            UiCmd::RefreshData => {
+                let d = self.data.clone();
+                let shared = self.shared.clone();
+                std::thread::spawn(move || {
+                    let result = d.refresh();
+                    shared.write().unwrap().status = match result {
+                        Ok(_) => "ARAM data refreshed".into(),
+                        Err(e) => format!("Data refresh failed: {e}"),
+                    };
+                    repaint();
+                });
+                return;
+            }
+            _ => {}
+        }
         let Some(lcu) = self.lcu.clone() else {
             self.status("League client not running");
             return;
@@ -376,6 +496,7 @@ impl Engine {
                     self.status("Swap failed (someone else may have taken it)");
                 }
             }
+            UiCmd::ReloadSettings | UiCmd::CheckUpdates | UiCmd::RefreshData | UiCmd::SyncHistory => unreachable!(),
             UiCmd::Reroll => {
                 if !lcu.send("POST", "/lol-champ-select/v1/session/my-selection/reroll", None) {
                     self.status("Reroll failed");
@@ -434,11 +555,17 @@ impl Engine {
             .cloned()
             .unwrap_or(Value::Null);
         let dead = me["isDead"].as_bool().unwrap_or(false);
-        let items: Vec<u32> = me["items"].as_array().map(|a| a.iter().map(|i| u32_of(&i["itemID"])).collect()).unwrap_or_default();
+        let items: Vec<u32> = me["items"]
+            .as_array()
+            .map(|a| a.iter().map(|i| u32_of(&i["itemID"])).collect())
+            .unwrap_or_default();
         let game_time = v["gameData"]["gameTime"].as_f64().unwrap_or(0.0);
         if !self.picks_loaded {
             self.picks_loaded = true;
-            let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+            let unix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
             let start = unix - game_time;
             let mut c = self.scan.lock().unwrap();
             c.game_start = start;
@@ -574,7 +701,12 @@ impl Engine {
             s.status = "Demo mode".into();
         }
         let items = self.data.items()?;
-        let expected: Vec<u32> = detail.clusters.groups.first().map(|g| g.core.iter().map(|i| i.id).collect()).unwrap_or_default();
+        let expected: Vec<u32> = detail
+            .clusters
+            .groups
+            .first()
+            .map(|g| g.core.iter().map(|i| i.id).collect())
+            .unwrap_or_default();
         let build = build_profile(&items, &expected);
         {
             let mut c = self.scan.lock().unwrap();
@@ -583,8 +715,14 @@ impl Engine {
             c.picks = round.saturating_sub(1);
             c.build = build.clone();
         }
-        self.shared.write().unwrap().game =
-            Some(GameState { champ: Some(cid), level: 11, round, dead: true, build: build.labels(&meta), build_expected: true });
+        self.shared.write().unwrap().game = Some(GameState {
+            champ: Some(cid),
+            level: 11,
+            round,
+            dead: true,
+            build: build.labels(&meta),
+            build_expected: true,
+        });
         self.overlay.send(OverlayCmd::PanelVisible(Some(true)));
         {
             // demo relics: one up, one about to spawn, two counting down
@@ -600,80 +738,21 @@ impl Engine {
     }
 }
 
-// ------------------------------------------------------------------ item sets
-
-/// One item-set page per build style (the clusters' names: "AP burst", "Tank / Heartsteel"…),
-/// so the shop's item-set dropdown switches between genuinely different builds. Clusters
-/// sharing a style become variants on the same page. `prefer` (a cluster index) goes first.
-pub fn make_item_sets(meta: &Meta, detail: &ChampDetail, cid: u32, prefer: Option<usize>) -> Vec<Value> {
-    let block = |title: String, ids: Vec<u32>| {
-        let mut seen = std::collections::HashSet::new();
-        let items: Vec<Value> = ids.into_iter().filter(|i| seen.insert(*i)).map(|i| json!({"id": i.to_string(), "count": 1})).collect();
-        json!({"type": title, "items": items})
+fn import_item_sets(lcu: &Lcu, new_sets: &[Value], cid: u32, replace_tools: bool) -> bool {
+    let Some(me) = lcu.get("/lol-summoner/v1/current-summoner") else {
+        return false;
     };
-    let mut order: Vec<usize> = (0..detail.clusters.groups.len()).collect();
-    if let Some(p) = prefer.filter(|p| *p < order.len()) {
-        order.retain(|i| *i != p);
-        order.insert(0, p);
-    }
-    // group by style name, keeping the order styles first appear in
-    let mut styles: Vec<(String, Vec<&Cluster>)> = vec![];
-    for i in order {
-        let g = &detail.clusters.groups[i];
-        let name = if g.name_en.is_empty() { "Build".to_string() } else { g.name_en.clone() };
-        match styles.iter_mut().find(|(n, _)| *n == name) {
-            Some((_, v)) => v.push(g),
-            None => styles.push((name, vec![g])),
-        }
-    }
-    let boots: Vec<u32> = detail.boots.top.iter().filter_map(|b| b.items.first().map(|i| i.id)).collect();
-    let singles: Vec<u32> = detail.single_items.top.iter().filter_map(|s| s.items.first().map(|i| i.id)).take(10).collect();
-    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-    let pages = styles.into_iter().take(4).enumerate().map(|(rank, (style, clusters))| {
-        let main = clusters[0];
-        let mut blocks = vec![];
-        blocks.push(block(
-            format!("Core · {:.1}% WR · {:.1}k games", main.wr * 100.0, main.g / 1000.0),
-            main.core.iter().map(|i| i.id).collect(),
-        ));
-        blocks.push(block("Full build".into(), main.completion.iter().map(|i| i.id).collect()));
-        blocks.push(block("Next items".into(), main.options.iter().chain(main.tail.iter()).map(|i| i.id).collect()));
-        for (n, v) in clusters.iter().skip(1).enumerate() {
-            blocks.push(block(
-                format!("Variant {} core · {:.1}% WR", n + 2, v.wr * 100.0),
-                v.core.iter().chain(v.options.iter()).map(|i| i.id).collect(),
-            ));
-        }
-        let mut b: Vec<u32> = main.route_boot.iter().map(|i| i.id).collect();
-        b.extend(boots.iter());
-        blocks.push(block("Boots".into(), b));
-        blocks.push(block("Highest win-rate items".into(), singles.clone()));
-        blocks.retain(|b| b["items"].as_array().map(|a| !a.is_empty()).unwrap_or(false));
-        json!({
-            "title": format!("{TAG} {} · {style}", meta.champ_name(cid)),
-            "associatedChampions": [cid], "associatedMaps": [],
-            "blocks": blocks, "map": "any", "mode": "any", "type": "custom", "sortrank": rank,
-            "startedFrom": "blank", "preferredItemSlots": [],
-            "uid": format!("mayhem-companion-{cid}-{rank}-{stamp}"),
-        })
-    });
-    pages.collect()
-}
-
-fn import_item_sets(lcu: &Lcu, new_sets: &[Value]) -> bool {
-    let Some(me) = lcu.get("/lol-summoner/v1/current-summoner") else { return false };
-    let sid = me["summonerId"].as_u64().unwrap_or(0);
+    let Some(sid) = me["summonerId"].as_u64().filter(|id| *id > 0) else {
+        return false;
+    };
     let path = format!("/lol-item-sets/v1/item-sets/{sid}/sets");
-    let current = lcu.get(&path).unwrap_or(json!({}));
-    let mut sets: Vec<Value> = current["itemSets"]
-        .as_array()
-        .map(|a| a.iter().filter(|s| !s["title"].as_str().unwrap_or("").starts_with(TAG)).cloned().collect())
-        .unwrap_or_default();
-    sets.extend(new_sets.iter().cloned());
-    let body = json!({
-        "accountId": me.get("accountId").cloned().unwrap_or(current["accountId"].clone()),
-        "itemSets": sets,
-        "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0),
-    });
-    lcu.send("PUT", &path, Some(&body))
+    // A failed read must never turn into an overwrite of the entire collection.
+    let Some(mut current) = lcu.get(&path) else { return false };
+    let Some(existing) = current["itemSets"].as_array() else { return false };
+    current["itemSets"] = json!(merge_item_sets(existing, new_sets, cid, replace_tools));
+    current["timestamp"] = json!(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0));
+    lcu.send("PUT", &path, Some(&current))
 }

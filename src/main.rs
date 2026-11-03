@@ -16,6 +16,9 @@ mod config;
 mod data;
 mod engine;
 mod ipc;
+mod item_sets;
+mod insights;
+mod history;
 mod lcu;
 mod logger;
 mod model;
@@ -24,6 +27,7 @@ mod overlay;
 mod scan;
 mod state;
 mod ui;
+mod updates;
 
 use config::Config;
 use state::{ScanCtl, Shared};
@@ -60,6 +64,7 @@ fn main() {
     logger::init(if mode == "--companion" { "ui " } else { "svc" });
     let cfg = Config::load();
     let data = data::Data::new(&cfg.data_url, cfg.cache_hours);
+    data.start_refresh(state::repaint);
     match mode {
         "--scan" => scan_once(&cfg, &data, args.get(1).map(String::as_str).unwrap_or("Annie")),
         "--companion" => run_companion(cfg, data, &args),
@@ -96,9 +101,16 @@ fn run_service(cfg: Config, data: Arc<data::Data>, args: &[String]) {
         }
         return;
     }
+    if args.is_empty() && updates::install_pending(background) {
+        return;
+    }
     log::info!("service starting ({})", env!("CARGO_PKG_VERSION"));
     let shared = Arc::new(RwLock::new(Shared::default()));
-    let scan = Arc::new(Mutex::new(ScanCtl { max_round: 1, ..Default::default() }));
+    updates::start(shared.clone());
+    let scan = Arc::new(Mutex::new(ScanCtl {
+        max_round: 1,
+        ..Default::default()
+    }));
     let relics: state::RelicRef = Arc::new(Mutex::new(state::RelicClock::default()));
     let overlay = overlay::spawn(cfg.clone(), relics.clone());
     if cfg.scan_cards {
@@ -127,7 +139,10 @@ fn run_service(cfg: Config, data: Arc<data::Data>, args: &[String]) {
         std::thread::spawn(move || for _ in rx {});
     } else {
         lcu::spawn(cfg.league_dir.clone(), tx);
-        std::thread::Builder::new().name("engine".into()).spawn(move || engine.run(rx)).expect("spawn engine");
+        std::thread::Builder::new()
+            .name("engine".into())
+            .spawn(move || engine.run(rx))
+            .expect("spawn engine");
     }
     if !background {
         spawn_self(&["--companion"]);
@@ -172,7 +187,12 @@ fn run_companion(cfg: Config, data: Arc<data::Data>, args: &[String]) {
     if let Some(icon) = icon {
         viewport = viewport.with_icon(icon);
     }
-    let options = eframe::NativeOptions { viewport, renderer: eframe::Renderer::Glow, vsync: true, ..Default::default() };
+    let options = eframe::NativeOptions {
+        viewport,
+        renderer: eframe::Renderer::Glow,
+        vsync: true,
+        ..Default::default()
+    };
     let result = eframe::run_native(
         overlay::COMPANION_TITLE,
         options,
@@ -236,10 +256,27 @@ fn scan_once(cfg: &Config, data: &Arc<data::Data>, champ: &str) {
         scanner.relic_sync(&relics);
         let r = *relics.lock().unwrap();
         let rem: Vec<String> = r.ready_at.iter().map(|t| format!("{:.0}s", t - r.now())).collect();
-        log::info!("relics (blue inner, blue outer, red outer, red inner): {rem:?} in {} ms", t.elapsed().as_millis() / 2);
-        let ctl = ScanCtl { meta: Some(meta.clone()), ratings, max_round: 4, ..Default::default() };
+        log::info!(
+            "relics (blue inner, blue outer, red outer, red inner): {rem:?} in {} ms",
+            t.elapsed().as_millis() / 2
+        );
+        let ctl = ScanCtl {
+            meta: Some(meta.clone()),
+            ratings,
+            max_round: 4,
+            ..Default::default()
+        };
         for b in scan::make_badges(&hits, &meta, &ctl) {
-            log::info!("MATCH {} {} {:.1}% at ({}, {}) rank={:?} fit={:?}", b.name, b.tier.label(), b.wr * 100.0, b.x, b.y, b.rank, b.fit);
+            log::info!(
+                "MATCH {} {} {:.1}% at ({}, {}) rank={:?} fit={:?}",
+                b.name,
+                b.tier.label(),
+                b.wr * 100.0,
+                b.x,
+                b.y,
+                b.rank,
+                b.fit
+            );
         }
         log::info!(
             "timing [{}]: find+lock {} ms, strip scan {} ms ({} hits), repeat scan avg {} us, strip copy avg {} us",
@@ -303,7 +340,12 @@ fn render_debug(cfg: &Config, data: &Arc<data::Data>, args: &[String]) {
         ctl.max_round = 4;
         ctl.picks = round.saturating_sub(1);
         let items = data.items()?;
-        let core: Vec<u32> = detail.clusters.groups.first().map(|g| g.core.iter().map(|i| i.id).collect()).unwrap_or_default();
+        let core: Vec<u32> = detail
+            .clusters
+            .groups
+            .first()
+            .map(|g| g.core.iter().map(|i| i.id).collect())
+            .unwrap_or_default();
         ctl.build = model::build_profile(&items, &core);
 
         let mut reader = scan::Reader::new(&cfg.ocr_language)?;

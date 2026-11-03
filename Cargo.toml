@@ -1,6 +1,6 @@
 [package]
 name = "mayhem-companion"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "Unofficial companion for League of Legends ARAM: Mayhem: live augment tiers on the pick cards, heal relic timers, champ select helper, build browser"
 license = "MIT"
@@ -12,8 +12,6 @@ name = "mayhem-companion"
 path = "src/main.rs"
 
 [dependencies]
-eframe = { version = "0.29", default-features = false, features = ["glow", "default_fonts"] }
-egui = "0.29"
 ureq = { version = "2.10", features = ["json"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tungstenite = { version = "0.24", default-features = false, features = ["handshake", "__rustls-tls"] }
@@ -23,11 +21,15 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 strsim = "0.11"
 base64 = "0.22"
 log = "0.4"
+sha2 = "0.10"
+semver = "1"
 
 [build-dependencies]
 embed-resource = "2.5"
 
 [target.'cfg(windows)'.dependencies]
+eframe = { version = "0.29", default-features = false, features = ["glow", "default_fonts"] }
+egui = "0.29"
 windows = { version = "0.58", features = [
   "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Graphics_Direct2D", "Win32_Graphics_Direct2D_Common",
   "Win32_Graphics_DirectWrite", "Win32_Graphics_Dxgi_Common", "Win32_UI_WindowsAndMessaging",

@@ -1,6 +1,8 @@
 //! Companion window (egui, GPU-rendered, repaints only on input or new data).
 
 mod images;
+mod history;
+mod insights;
 mod placement;
 mod widgets;
 
@@ -22,6 +24,9 @@ enum Tab {
     ChampSelect,
     Champions,
     Augments,
+    Settings,
+    History,
+    Changes,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -75,6 +80,13 @@ pub struct App {
     pending_open: Option<(String, String)>,
     /// The window starts hidden; first frame puts it where it was last time, then shows it.
     placed: bool,
+    settings_status: String,
+    history_records: Vec<crate::history::MatchRecord>,
+    history_key: (String, u64),
+    history_error: String,
+    history_search: String,
+    history_patch: String,
+    history_group: crate::history::Group,
 }
 
 impl App {
@@ -102,17 +114,32 @@ impl App {
             best_for_aug: HashMap::new(),
             pending_open: None,
             placed: false,
+            settings_status: String::new(),
+            history_records: vec![],
+            history_key: (String::new(), u64::MAX),
+            history_error: String::new(),
+            history_search: String::new(),
+            history_patch: String::new(),
+            history_group: crate::history::Group::Champion,
         }
     }
 
     /// Start on a tab / with a champion or augment selected (e.g. `--tab augments --select "Mad Scientist"`).
     pub fn open(&mut self, tab: Option<&str>, select: Option<&str>) {
+        match tab {
+            Some("history") => self.tab = Tab::History,
+            Some("settings") => self.tab = Tab::Settings,
+            _ => {}
+        }
         self.pending_open = Some((tab.unwrap_or("").to_ascii_lowercase(), select.unwrap_or("").to_string()));
     }
 
     fn apply_open(&mut self, meta: &Meta) {
         let Some((tab, select)) = self.pending_open.take() else { return };
         match tab.as_str() {
+            "settings" => self.tab = Tab::Settings,
+            "history" => self.tab = Tab::History,
+            "changes" => self.tab = Tab::Changes,
             "champions" => self.tab = Tab::Champions,
             "augments" => self.tab = Tab::Augments,
             "champselect" | "champ_select" => self.tab = Tab::ChampSelect,
@@ -181,52 +208,86 @@ impl App {
 
     // ------------------------------------------------------------------ top bar
 
-    fn top_bar(&mut self, ctx: &egui::Context, meta: &Meta) {
+    fn top_bar(&mut self, ctx: &egui::Context, meta: Option<&Meta>) {
         let s = self.shared.read().unwrap();
-        let (dot, status) = match (s.client, s.mayhem, s.phase.as_str()) {
-            _ if s.demo => (WARN, "Demo mode".to_string()),
-            (Client::NotRunning, ..) => (FAINT, "League client not running".into()),
-            (_, Some(false), _) => (DIM, "Not a Mayhem game".into()),
-            (_, Some(true), "ChampSelect") => (GOOD, "In champ select".into()),
-            (_, Some(true), "InProgress") => (GOOD, "In game".into()),
-            (_, _, p) if !p.is_empty() && p != "None" => (ACCENT, format!("Client: {p}")),
-            _ => (ACCENT, "Client connected".into()),
+        let status = match (s.client, s.mayhem, s.phase.as_str()) {
+            _ if s.demo => "Demo mode".to_string(),
+            (Client::NotRunning, ..) => "League client not running".into(),
+            (_, Some(false), _) => "Not a Mayhem game".into(),
+            (_, Some(true), "ChampSelect") => "In champ select".into(),
+            (_, Some(true), "InProgress") => "In game".into(),
+            (_, _, p) if !p.is_empty() && p != "None" => format!("Client: {p}"),
+            _ => "Client connected".into(),
         };
         drop(s);
-        egui::TopBottomPanel::top("top")
-            .exact_height(52.0)
-            .frame(egui::Frame::none().fill(PANEL).inner_margin(Margin::symmetric(18.0, 0.0)).stroke(Stroke::new(1.0_f32, BORDER)))
+        egui::TopBottomPanel::top("top").exact_height(86.0)
+            .frame(egui::Frame::none().fill(PANEL).inner_margin(Margin::symmetric(18.0, 4.0)).stroke(Stroke::new(1.0_f32, BORDER)))
             .show(ctx, |ui| {
-                ui.horizontal_centered(|ui| {
+                ui.horizontal(|ui| {
                     ui.label(RichText::new("MAYHEM").font(bold(18.0)).color(rgb(Tier::SPlus.rgb())));
                     ui.label(RichText::new("COMPANION").font(bold(18.0)).color(TEXT)).on_hover_text(crate::LEGAL);
-                    ui.add_space(20.0);
-                    for (tab, label) in [(Tab::ChampSelect, "Champ Select"), (Tab::Champions, "Champions"), (Tab::Augments, "Augments")] {
-                        let on = self.tab == tab;
-                        let text = RichText::new(label).font(semi(14.5)).color(if on { TEXT } else { DIM });
-                        let resp = ui.add(egui::Button::new(text).frame(false).min_size(vec2(0.0, 52.0)));
-                        if on {
-                            let r = resp.rect;
-                            ui.painter().rect_filled(Rect::from_min_max(pos2(r.left(), r.bottom() - 3.0), r.right_bottom()), 1.5, ACCENT);
-                        }
-                        if resp.clicked() {
-                            self.tab = tab;
-                        }
-                        ui.add_space(6.0);
-                    }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.label(
-                            RichText::new(format!("Patch {} · {:.0}k games", meta.patch_prefix, meta.patch_changes.current_games / 1000.0))
-                                .font(reg(12.5))
-                                .color(FAINT),
-                        );
-                        ui.add_space(14.0);
-                        ui.label(RichText::new(status).font(semi(13.0)).color(DIM));
-                        let (r, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
-                        ui.painter().circle_filled(r.center(), 4.5, dot);
+                        if let Some(meta) = meta { ui.label(RichText::new(format!("Patch {} · {:.0}k games",meta.patch_prefix,meta.patch_changes.current_games/1000.0)).color(FAINT)); }
+                        ui.label(RichText::new(&status).color(DIM));
+                    });
+                });
+                ScrollArea::horizontal().id_salt("navigation").show(ui,|ui| {
+                    ui.horizontal(|ui| {
+                        for (tab,label) in [(Tab::ChampSelect,"Champ Select"),(Tab::Champions,"Champions"),(Tab::Augments,"Augments"),
+                            (Tab::History,"History"),(Tab::Changes,"Patch Changes"),(Tab::Settings,"Settings")] {
+                            let on=self.tab==tab;
+                            let resp=ui.add(egui::Button::new(RichText::new(label).font(semi(14.5)).color(if on {TEXT} else {DIM})).frame(false).min_size(vec2(0.0,32.0)));
+                            if on {let r=resp.rect;ui.painter().rect_filled(Rect::from_min_max(pos2(r.left(),r.bottom()-3.0),r.right_bottom()),1.5,ACCENT);}
+                            if resp.clicked() {self.tab=tab;}
+                            ui.add_space(8.0);
+                        }
                     });
                 });
             });
+    }
+
+    fn tab_settings(&mut self, ctx: &egui::Context) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.heading("Settings");
+            ui.add_space(12.0);
+            let mut keep_open = !self.cfg.close_companion_in_game;
+            let mut changed = ui.checkbox(&mut keep_open, "Keep companion open while playing").changed();
+            self.cfg.close_companion_in_game = !keep_open;
+            changed |= ui.checkbox(&mut self.cfg.open_companion_in_champ_select, "Open companion in champion select").changed();
+            ui.separator();
+            changed |= ui.checkbox(&mut self.cfg.import_item_set, "Automatically import item builds").changed();
+            changed |= ui.checkbox(&mut self.cfg.replace_tool_builds, "Replace other tools' builds for my current champion").changed();
+            ui.label("Recognised tools include Blitz, Porofessor, Mobalytics, U.GG and OP.GG. Personal builds are kept.");
+            ui.label("Item build pages:");
+            changed |= ui.radio_value(&mut self.cfg.combined_item_sets, false, "Separate page for each build type").changed();
+            changed |= ui.radio_value(&mut self.cfg.combined_item_sets, true, "All builds on one page").changed();
+            ui.separator();
+            changed |= ui.checkbox(&mut self.cfg.auto_update_app, "Automatically download app updates").changed();
+            ui.label("Checks on startup and every 6 hours. Verified updates install after quitting from the tray and reopening.");
+            changed |= ui.checkbox(&mut self.cfg.auto_update_data, "Automatically refresh ARAM data").changed();
+            ui.label(format!("Data refreshes every {} hours while the app is open; cached data remains available offline.", self.cfg.cache_hours));
+            if changed {
+                match self.cfg.save() {
+                    Ok(()) => {
+                        self.settings_status = "Settings saved".into();
+                        let _ = self.tx.send(Msg::Ui(UiCmd::ReloadSettings));
+                    }
+                    Err(e) => self.settings_status = format!("Couldn't save settings: {e}"),
+                }
+            }
+            ui.horizontal(|ui| {
+                if ui.button("Check for app updates").clicked() { let _ = self.tx.send(Msg::Ui(UiCmd::CheckUpdates)); }
+                if ui.button("Refresh ARAM data now").clicked() {
+                    let d = self.data.clone();
+                    d.load_async("refresh".into(), |d| d.refresh(), repaint);
+                    let _ = self.tx.send(Msg::Ui(UiCmd::RefreshData));
+                }
+            });
+            ui.label(&self.settings_status);
+            ui.label(format!("App version {}", env!("CARGO_PKG_VERSION")));
+            ui.label(&self.shared.read().unwrap().update_status);
+            if let Some(e) = self.data.load_error("refresh") { ui.colored_label(BAD, e); }
+        });
     }
 
     // ------------------------------------------------------------------ champion rows
@@ -710,7 +771,7 @@ impl App {
     }
 
     fn champ_select_side(&mut self, ui: &mut Ui, meta: &Arc<Meta>, cs: &ChampSelectState) {
-        let mine = meta.champs.get(&cs.my_champ.to_string()).map(|c| champion_rating(c, &self.cfg));
+        let mine = crate::insights::recommend(meta, &self.cfg, cs.my_champ, &cs.teammates);
         ui.label(RichText::new("YOUR PICK").font(bold(12.0)).color(DIM));
         ui.add_space(4.0);
         if cs.my_champ > 0 {
@@ -727,22 +788,22 @@ impl App {
             ui.add_space(14.0);
             ui.label(RichText::new("BENCH").font(bold(12.0)).color(DIM));
             ui.add_space(2.0);
-            let mut bench: Vec<(u32, f64)> = cs
-                .bench
-                .iter()
-                .map(|c| (*c, meta.champs.get(&c.to_string()).map(|i| champion_rating(i, &self.cfg).delta).unwrap_or(0.0)))
-                .collect();
-            bench.sort_by(|a, b| b.1.total_cmp(&a.1));
-            for (cid, d) in bench {
-                let diff = mine.map(|m| d - m.delta).unwrap_or(0.0);
-                let (t, c) = delta_text(diff);
-                let resp = self.champ_row(ui, meta, cid, 46.0, false, Some((t, c)));
-                let resp = resp.on_hover_text("Click to swap");
-                if resp.clicked() {
-                    let _ = self.tx.send(Msg::Ui(UiCmd::SwapBench(cid)));
+            let mut bench: Vec<_> = cs.bench.iter().map(|cid| (*cid, crate::insights::recommend(meta, &self.cfg, *cid, &cs.teammates))).collect();
+            bench.sort_by(|a,b| b.1.as_ref().map(|r|r.score).unwrap_or(f64::NEG_INFINITY).total_cmp(&a.1.as_ref().map(|r|r.score).unwrap_or(f64::NEG_INFINITY)).then(a.0.cmp(&b.0)));
+            for (index,(cid,recommendation)) in bench.into_iter().enumerate() {
+                let extra=match (recommendation.as_ref(),mine.as_ref()) {
+                    (Some(r),Some(m)) => {let delta=r.score-m.score;Some((format!("{delta:+.1} fit"),if delta>=0.0 {GOOD} else {BAD}))},
+                    _ => None,
+                };
+                let resp=self.champ_row(ui,meta,cid,46.0,false,extra);
+                let explanation=recommendation.as_ref().map(|r|format!("Team recommendation score: {:.1} points\nChampion strength: {:+.1} · Pairings: {:+.1} · Team roles: {:+.1}\n{}\n\nHeuristic points, not a predicted win rate. Click to swap.",r.score,r.base,r.synergy,r.composition,r.reasons.join("\n")))
+                    .unwrap_or_else(||"No current statistics for this champion. Click to swap.".into());
+                if resp.on_hover_text(explanation).clicked() {let _=self.tx.send(Msg::Ui(UiCmd::SwapBench(cid)));}
+                if index==0 && recommendation.as_ref().zip(mine.as_ref()).is_some_and(|(r,m)|r.score>m.score) {
+                    ui.label(RichText::new("Best available team fit").font(reg(11.5)).color(GOOD));
                 }
             }
-            ui.label(RichText::new("Click a bench champion to swap. ± is the win-rate gap vs your pick.").font(reg(11.5)).color(FAINT));
+            ui.label(RichText::new("Ordered by champion strength, pairings and team needs. ± fit compares recommendation points with your pick; WR is the champion average. Hover for reasons.").font(reg(11.5)).color(FAINT));
         }
         if !cs.teammates.is_empty() {
             ui.add_space(14.0);
@@ -1031,28 +1092,40 @@ impl eframe::App for App {
             }
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         }
-        let Some(meta) = self.data.meta_cached() else {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                ui.centered_and_justified(|ui| {
-                    match self.data.load_error("meta") {
-                        Some(e) => ui.label(RichText::new(format!("Couldn't load Mayhem data: {e}")).color(BAD)),
-                        None => ui.label(RichText::new("Loading ARAM Mayhem data…").font(semi(16.0)).color(DIM)),
-                    };
-                });
-            });
+        let cached = self.data.meta_cached();
+        if cached.is_none() {
+            self.top_bar(ctx, None);
+            match self.tab {
+                Tab::History => self.tab_history(ctx, None),
+                Tab::Settings => self.tab_settings(ctx),
+                _ => {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        ui.centered_and_justified(|ui| {
+                            ui.label(match self.data.load_error("meta") {
+                                Some(e) => format!("Couldn't load Mayhem data: {e}"),
+                                None => "Loading ARAM Mayhem data…".into(),
+                            });
+                        });
+                    });
+                }
+            }
             self.data.load_async("meta".into(), |d| d.meta().map(|_| ()), repaint);
             return;
-        };
+        }
+        let meta = cached.unwrap();
         self.refresh_tables(&meta);
         self.apply_open(&meta);
         if std::mem::take(&mut self.shared.write().unwrap().show_champ_select) {
             self.tab = Tab::ChampSelect;
         }
-        self.top_bar(ctx, &meta);
+        self.top_bar(ctx, Some(&meta));
         match self.tab {
             Tab::ChampSelect => self.tab_champ_select(ctx, &meta),
             Tab::Champions => self.tab_champions(ctx, &meta),
             Tab::Augments => self.tab_augments(ctx, &meta),
+            Tab::Settings => self.tab_settings(ctx),
+            Tab::History => self.tab_history(ctx, Some(&meta)),
+            Tab::Changes => self.tab_changes(ctx, &meta),
         }
     }
 }

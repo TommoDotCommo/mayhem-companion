@@ -22,6 +22,14 @@ pub struct Snapshot {
     pub game: Option<GameState>,
     pub last_champ: Option<u32>,
     pub status: String,
+    #[serde(default)]
+    pub update_status: String,
+    #[serde(default)]
+    pub history_account: String,
+    #[serde(default)]
+    pub history_revision: u64,
+    #[serde(default)]
+    pub history_status: String,
     pub cards: Vec<Badge>,
     pub demo: bool,
 }
@@ -83,6 +91,10 @@ fn snapshot(shared: &SharedRef) -> Snapshot {
         game: s.game.clone(),
         last_champ: s.last_champ,
         status: s.status.clone(),
+        update_status: s.update_status.clone(),
+        history_account: s.history_account.clone(),
+        history_revision: s.history_revision,
+        history_status: s.history_status.clone(),
         cards: s.cards.clone(),
         demo: s.demo,
     }
@@ -98,7 +110,12 @@ pub fn serve(shared: SharedRef, tx: Sender<crate::engine::Msg>) {
     };
     let port = listener.local_addr().map(|a| a.port()).unwrap_or(0);
     let _ = std::fs::write(port_file(), port.to_string());
-    let server = Arc::new(Server { shared, conn: Mutex::new(None), dirty: Mutex::new(false), wake: Condvar::new() });
+    let server = Arc::new(Server {
+        shared,
+        conn: Mutex::new(None),
+        dirty: Mutex::new(false),
+        wake: Condvar::new(),
+    });
     let _ = SERVER.set(server.clone());
 
     // accept companions (a new one replaces the old)
@@ -202,6 +219,10 @@ pub fn connect(shared: SharedRef, cmds: Receiver<crate::engine::Msg>) {
                             s.game = snap.game;
                             s.last_champ = snap.last_champ;
                             s.status = snap.status;
+                            s.update_status = snap.update_status;
+                            s.history_account = snap.history_account;
+                            s.history_revision = snap.history_revision;
+                            s.history_status = snap.history_status;
                             s.cards = snap.cards;
                             s.demo = snap.demo;
                         }

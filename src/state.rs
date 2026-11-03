@@ -68,7 +68,9 @@ pub fn save_picks(game_start: f64, picks: u32) {
 /// The saved pick count, if it belongs to the game that started at `game_start`.
 pub fn load_picks(game_start: f64) -> Option<u32> {
     let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(picks_file()).ok()?).ok()?;
-    ((v["start"].as_f64()? - game_start).abs() < 30.0).then(|| v["picks"].as_u64().map(|p| p as u32)).flatten()
+    ((v["start"].as_f64()? - game_start).abs() < 30.0)
+        .then(|| v["picks"].as_u64().map(|p| p as u32))
+        .flatten()
 }
 
 fn relics_file() -> std::path::PathBuf {
@@ -135,6 +137,10 @@ pub struct Shared {
     /// The last champion we played or picked (keeps the companion useful after a game).
     pub last_champ: Option<u32>,
     pub status: String,
+    pub update_status: String,
+    pub history_account: String,
+    pub history_revision: u64,
+    pub history_status: String,
     pub cards: Vec<Badge>,
     /// Engine asks the UI to jump to the champ select tab.
     pub show_champ_select: bool,
@@ -157,6 +163,10 @@ pub fn repaint() {
 /// Commands from the companion UI to the engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum UiCmd {
+    ReloadSettings,
+    CheckUpdates,
+    RefreshData,
+    SyncHistory,
     ImportBuild { champ: u32, cluster: usize },
     SwapBench(u32),
     Reroll,
@@ -186,7 +196,11 @@ impl RelicClock {
     }
 
     pub fn start(&mut self, first_outer: f64, first_inner: f64) {
-        *self = RelicClock { active: true, ready_at: [first_inner, first_outer, first_outer, first_inner], ..*self };
+        *self = RelicClock {
+            active: true,
+            ready_at: [first_inner, first_outer, first_outer, first_inner],
+            ..*self
+        };
         self.marked = [None; 4];
     }
 }

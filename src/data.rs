@@ -61,7 +61,7 @@ impl Data {
         }
         match net::get_bytes(url) {
             Ok(bytes) => {
-                let tmp = path.with_extension("tmp");
+                let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
                 if std::fs::write(&tmp, &bytes).is_ok() {
                     let _ = std::fs::rename(&tmp, &path);
                 }
@@ -89,13 +89,49 @@ impl Data {
         let bytes = self.fetch("tier-list.json", &format!("{}/tier-list.json", self.base), Some(self.max_age))?;
         let meta: Meta = serde_json::from_slice(&bytes).map_err(|e| format!("tier-list.json: {e}"))?;
         let meta = Arc::new(meta);
-        let changed = self.meta.read().unwrap().as_ref().map(|(m, _)| m.patch_prefix != meta.patch_prefix);
-        if changed.unwrap_or(false) {
-            self.champs.write().unwrap().clear();
-        }
+        // A new dataset can be published within the same patch.
+        self.champs.write().unwrap().clear();
+        *self.items.write().unwrap() = None;
+        *self.aug_stats.write().unwrap() = None;
+        *self.balance.write().unwrap() = None;
         *self.meta.write().unwrap() = Some((meta.clone(), Instant::now()));
-        log::info!("data: patch {} ({} champions, {} augments)", meta.patch_prefix, meta.champs.len(), meta.augs.len());
+        log::info!(
+            "data: patch {} ({} champions, {} augments)",
+            meta.patch_prefix,
+            meta.champs.len(),
+            meta.augs.len()
+        );
         Ok(meta)
+    }
+
+    /// Explicit refresh validates the download before replacing the last good dataset.
+    pub fn refresh(&self) -> Result<(), String> {
+        let _guard = self.meta_lock.lock().unwrap();
+        let bytes = net::get_bytes(&format!("{}/tier-list.json", self.base))?;
+        let meta: Meta = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        let tmp = self.dir.join(format!("tier-list-{}.tmp", std::process::id()));
+        std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
+        std::fs::rename(tmp, self.dir.join("tier-list.json")).map_err(|e| e.to_string())?;
+        self.champs.write().unwrap().clear();
+        *self.items.write().unwrap() = None;
+        *self.aug_stats.write().unwrap() = None;
+        *self.balance.write().unwrap() = None;
+        *self.meta.write().unwrap() = Some((Arc::new(meta), Instant::now()));
+        Ok(())
+    }
+
+    /// Each process has its own memory cache; keep both fresh while left open.
+    pub fn start_refresh(self: &Arc<Self>, done: fn()) {
+        let data = self.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(Duration::from_secs(60));
+            if crate::config::Config::load().auto_update_data {
+                if let Err(e) = data.meta() {
+                    log::warn!("data refresh: {e}");
+                }
+                done();
+            }
+        });
     }
 
     pub fn meta_cached(&self) -> Option<Arc<Meta>> {
@@ -109,7 +145,7 @@ impl Data {
         let file = format!("champions_{cid}.json");
         // a champion file older than the tier list belongs to an older dataset
         let tier_age = age(&self.dir.join("tier-list.json")).unwrap_or(self.max_age);
-        let max_age = tier_age.min(self.max_age) + Duration::from_secs(60);
+        let max_age = tier_age.min(self.max_age);
         let bytes = self.fetch(&file, &format!("{}/champions/{cid}.json", self.base), Some(max_age))?;
         let detail: ChampDetail = serde_json::from_slice(&bytes).map_err(|e| format!("{file}: {e}"))?;
         let detail = Arc::new(detail);
@@ -210,5 +246,42 @@ impl Data {
 
     pub fn load_error(&self, key: &str) -> Option<String> {
         self.failed.lock().unwrap().get(key).map(|(_, e)| e.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    #[test]
+    fn same_patch_refresh_invalidates_memory_and_bad_download_keeps_last_good_data() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for body in ["{}", "{}", "invalid json"] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                let mut request = [0u8; 4096];
+                let _ = stream.read(&mut request).unwrap();
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+            }
+        });
+        let mut data = Data::new(&url, 12.0);
+        let dir = std::env::temp_dir().join(format!("mayhem-refresh-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        Arc::get_mut(&mut data).unwrap().dir = dir.clone();
+        data.refresh().unwrap();
+        let first = data.meta_cached().unwrap();
+        data.champs.write().unwrap().insert(1, Arc::new(ChampDetail::default()));
+        data.refresh().unwrap();
+        assert!(data.champ_cached(1).is_none());
+        let second = data.meta_cached().unwrap();
+        assert!(!Arc::ptr_eq(&first, &second));
+        let good_disk = std::fs::read(dir.join("tier-list.json")).unwrap();
+        assert!(data.refresh().is_err());
+        assert!(Arc::ptr_eq(&second, &data.meta_cached().unwrap()));
+        assert_eq!(good_disk, std::fs::read(dir.join("tier-list.json")).unwrap());
+        server.join().unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

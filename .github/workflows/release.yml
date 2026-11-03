@@ -1,12 +1,16 @@
 name: release
 
-# Push a version tag (git tag v0.3.1 && git push origin v0.3.1) to build and publish.
+# Push a version tag to test, build and publish the corresponding release notes.
 on:
   push:
     tags: ["v*"]
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -15,6 +19,17 @@ jobs:
       - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify release version and notes
+        shell: pwsh
+        run: |
+          $package = (cargo metadata --no-deps --format-version 1 --locked | ConvertFrom-Json).packages |
+            Where-Object { $_.name -eq "mayhem-companion" }
+          if ("v$($package.version)" -ne "${{ github.ref_name }}") { throw "Tag must match Cargo package version" }
+          if (!(Test-Path "docs/releases/${{ github.ref_name }}.md")) { throw "Release notes are missing" }
+
+      - name: Test
+        run: cargo test --locked
 
       - name: Build
         run: cargo build --release --locked
@@ -27,13 +42,10 @@ jobs:
           $exe = "target\release\mayhem-companion.exe"
           $h = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
           "$h  mayhem-companion.exe" | Out-File -Encoding ascii "$exe.sha256"
-          $notes = @"
-          Unofficial ARAM: Mayhem companion for Windows. Download ``mayhem-companion.exe``, put it in its own folder and run it. Set League to Borderless or Windowed.
-
-          **SHA-256:** ``$h``
-
-          The exe isn't code-signed yet, so Windows SmartScreen may warn and Defender's machine-learning scanner may flag it as a false positive. Check the hash above, or build it yourself from the source.
-
-          Mayhem Companion isn't endorsed by Riot Games and doesn't reflect the views or opinions of Riot Games or anyone officially involved in producing or managing Riot Games properties. Riot Games, and all associated properties are trademarks or registered trademarks of Riot Games, Inc.
-          "@
-          gh release create "${{ github.ref_name }}" $exe "$exe.sha256" --title "Mayhem Companion ${{ github.ref_name }}" --notes $notes
+          $notes = Get-Content "docs/releases/${{ github.ref_name }}.md" -Raw
+          $notes += "`n`n**SHA-256:** ``$h```n"
+          $notes | Set-Content -Encoding utf8 "target/release-notes.md"
+          gh release create "${{ github.ref_name }}" $exe "$exe.sha256" --verify-tag --draft --title "Mayhem Companion ${{ github.ref_name }}" --notes-file "target/release-notes.md"
+          if ($LASTEXITCODE -ne 0) { throw "Could not upload release assets" }
+          gh release edit "${{ github.ref_name }}" --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { throw "Could not publish release" }
