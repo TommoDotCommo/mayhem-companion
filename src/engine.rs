@@ -134,7 +134,8 @@ impl Engine {
         let queue = &session["gameData"]["queue"];
         let Some(id) = queue["id"].as_i64() else { return };
         let mode = queue["gameMode"].as_str().unwrap_or("");
-        let is = self.cfg.mayhem_queue_ids.contains(&id) || mode.to_ascii_uppercase().contains("KIWI");
+        // custom games have queue -1: the mode ("KIWI") shows up elsewhere in the session
+        let is = self.cfg.mayhem_queue_ids.contains(&id) || session.to_string().to_ascii_uppercase().contains("\"KIWI\"");
         log::info!("queue {id} ({mode}) mayhem={is}");
         self.mayhem = Some(is);
         self.shared.write().unwrap().mayhem = Some(is);
