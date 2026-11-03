@@ -399,6 +399,8 @@ pub struct Scanner {
     band: Option<(i32, i32)>,
     relic_band: Option<(i32, i32)>,
     relic_spacing: Option<f32>,
+    /// Centre of the relic timer bar (it isn't exactly the screen centre).
+    relic_mid: Option<f32>,
     relic_absent: [u8; 4],
     relic_band_misses: u8,
     /// Minimap watch: consecutive reads with the relic's "+" seen / clearly gone, and when
@@ -436,11 +438,13 @@ impl Scanner {
         let band = layout.load(reader.screen);
         let relic_band = layout.load_key(&format!("relics:{}", Layout::key(reader.screen)));
         let relic_spacing = layout.load_key(&format!("relicgap:{}", Layout::key(reader.screen))).map(|(s, _)| s as f32);
+        let relic_mid = layout.load_key(&format!("relicmid:{}", Layout::key(reader.screen))).map(|(m, _)| m as f32);
         Ok(Scanner {
             reader,
             band,
             relic_band,
             relic_spacing,
+            relic_mid,
             relic_absent: [0; 4],
             relic_band_misses: 0,
             relic_seen: [0; 4],
@@ -553,7 +557,8 @@ impl Scanner {
             Some((top, bottom)) => lines.extend(self.reader.read(x0, top, w, bottom - top).unwrap_or_default()),
             None => {
                 let (h, step) = ((sh as f32 * 0.08) as i32, (sh as f32 * 0.05) as i32);
-                let mut y = (sh as f32 * 0.02) as i32;
+                // Mayhem shows them in a bar at the very top of the screen while Tab is held
+                let mut y = 0;
                 while y < (sh as f32 * 0.60) as i32 {
                     lines.extend(self.reader.read(x0, y, w, h).unwrap_or_default());
                     y += step;
@@ -603,6 +608,11 @@ impl Scanner {
                 self.relic_spacing = Some(gap);
                 self.layout.save_key(&format!("relicgap:{key}"), (gap.round() as i32, 0));
             }
+            let mid = (row[0].0 + row[3].0) / 2.0;
+            if self.relic_mid.map(|m| (m - mid).abs() > 2.0).unwrap_or(true) {
+                self.relic_mid = Some(mid);
+                self.layout.save_key(&format!("relicmid:{key}"), (mid.round() as i32, 0));
+            }
         }
         let y = row[0].1;
         let band = ((y - th * 1.5).max(0.0) as i32, (y + th * 2.5) as i32);
@@ -613,7 +623,8 @@ impl Scanner {
         }
         // which slot is each token in? slots sit at centre ± 0.5 and ± 1.5 spacings
         let s = self.relic_spacing.unwrap_or(th * 4.6);
-        let slots = [cx - 1.5 * s, cx - 0.5 * s, cx + 0.5 * s, cx + 1.5 * s];
+        let mid = self.relic_mid.unwrap_or(cx);
+        let slots = [mid - 1.5 * s, mid - 0.5 * s, mid + 0.5 * s, mid + 1.5 * s];
         let mut seen = [None; 4];
         for t in &row {
             let (k, d) = slots.iter().enumerate().map(|(k, sx)| (k, (t.0 - sx).abs())).min_by(|a, b| a.1.total_cmp(&b.1)).unwrap();
