@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity type="win32" name="AramMayhem.Companion" version="0.2.0.0" processorArchitecture="amd64"/>
-  <description>ARAM Mayhem companion: augment tiers, champ select helper, build browser</description>
+  <assemblyIdentity type="win32" name="MayhemCompanion.App" version="0.3.0.0" processorArchitecture="amd64"/>
+  <description>Mayhem Companion: unofficial ARAM: Mayhem helper</description>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security><requestedPrivileges><requestedExecutionLevel level="asInvoker" uiAccess="false"/></requestedPrivileges></security>
   </trustInfo>

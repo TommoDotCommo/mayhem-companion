@@ -77,7 +77,7 @@ pub fn web() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
         ureq::AgentBuilder::new()
-            .user_agent("aram-mayhem-overlay/0.2")
+            .user_agent(concat!("mayhem-companion/", env!("CARGO_PKG_VERSION"), " (+https://github.com/TommoDotCommo/mayhem-companion)"))
             .timeout_connect(Duration::from_secs(5))
             .timeout(Duration::from_secs(30))
             .build()

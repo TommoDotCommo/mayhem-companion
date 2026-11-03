@@ -25,7 +25,7 @@ use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 const WM_APP_WAKE: u32 = WM_APP + 1;
-pub const COMPANION_TITLE: &str = "ARAM Mayhem";
+pub const COMPANION_TITLE: &str = "Mayhem Companion";
 
 // ------------------------------------------------------------------ public API
 
@@ -208,7 +208,7 @@ unsafe fn add_tray(hinst: HINSTANCE) -> Option<HWND> {
         hIcon: icon,
         ..Default::default()
     };
-    for (i, c) in "ARAM Mayhem".encode_utf16().enumerate() {
+    for (i, c) in "Mayhem Companion".encode_utf16().enumerate() {
         nid.szTip[i] = c;
     }
     let _ = Shell_NotifyIconW(NIM_ADD, &nid);
@@ -874,7 +874,7 @@ impl Overlay {
                 self.panel_shown = v.unwrap_or(!self.panel_shown);
                 if self.panel_content.is_none() && self.panel_shown {
                     self.panel_content = Some(PanelContent {
-                        title: "ARAM Mayhem".into(),
+                        title: "Mayhem Companion".into(),
                         subtitle: "waiting for a Mayhem game".into(),
                         footer: format!("{} hide · {} companion", self.cfg.panel_hotkey, self.cfg.companion_hotkey),
                         ..Default::default()

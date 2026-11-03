@@ -198,8 +198,8 @@ impl App {
             .frame(egui::Frame::none().fill(PANEL).inner_margin(Margin::symmetric(18.0, 0.0)).stroke(Stroke::new(1.0_f32, BORDER)))
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
-                    ui.label(RichText::new("ARAM").font(bold(18.0)).color(TEXT));
                     ui.label(RichText::new("MAYHEM").font(bold(18.0)).color(rgb(Tier::SPlus.rgb())));
+                    ui.label(RichText::new("COMPANION").font(bold(18.0)).color(TEXT)).on_hover_text(crate::LEGAL);
                     ui.add_space(20.0);
                     for (tab, label) in [(Tab::ChampSelect, "Champ Select"), (Tab::Champions, "Champions"), (Tab::Augments, "Augments")] {
                         let on = self.tab == tab;
@@ -370,7 +370,7 @@ impl App {
                     (None, Some(_)) => "Mayhem only",
                     _ => "ARAM balance (applies in Mayhem too)",
                 };
-                resp.on_hover_text(src);
+                resp.on_hover_text(format!("{src}\nSource: League of Legends Wiki (CC BY-SA 3.0)"));
             }
             // ARAM changes Mayhem removes
             let removed: Vec<String> = b

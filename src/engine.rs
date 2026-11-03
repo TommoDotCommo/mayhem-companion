@@ -654,7 +654,7 @@ pub fn make_item_sets(meta: &Meta, detail: &ChampDetail, cid: u32, prefer: Optio
             "associatedChampions": [cid], "associatedMaps": [],
             "blocks": blocks, "map": "any", "mode": "any", "type": "custom", "sortrank": rank,
             "startedFrom": "blank", "preferredItemSlots": [],
-            "uid": format!("aram-mayhem-{cid}-{rank}-{stamp}"),
+            "uid": format!("mayhem-companion-{cid}-{rank}-{stamp}"),
         })
     });
     pages.collect()

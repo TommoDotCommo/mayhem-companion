@@ -13,7 +13,7 @@ struct FileLogger {
 
 impl log::Log for FileLogger {
     fn enabled(&self, meta: &log::Metadata) -> bool {
-        meta.level() <= self.level && meta.target().starts_with("aram_mayhem")
+        meta.level() <= self.level && meta.target().starts_with(env!("CARGO_CRATE_NAME"))
     }
 
     fn log(&self, record: &log::Record) {

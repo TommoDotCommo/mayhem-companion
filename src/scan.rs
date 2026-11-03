@@ -849,7 +849,8 @@ impl Scanner {
 
     /// Save the watched minimap area as a PNG (relic_debug\), to see what the watch saw.
     fn debug_shot(&mut self, relic: usize, what: &str, bgra: &[u8], w: i32, h: i32) {
-        if self.debug_shots >= 80 || bgra.len() < (w * h * 4) as usize {
+        // only when debugging (ARAM_DEBUG set): pictures of the minimap for tuning
+        if std::env::var_os("ARAM_DEBUG").is_none() || self.debug_shots >= 80 || bgra.len() < (w * h * 4) as usize {
             return;
         }
         self.debug_shots += 1;

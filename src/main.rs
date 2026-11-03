@@ -7,6 +7,9 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+/// Riot's legal notice for fan projects.
+pub const LEGAL: &str = "Mayhem Companion isn't endorsed by Riot Games and doesn't reflect the views or opinions of Riot Games or anyone officially involved in producing or managing Riot Games properties. Riot Games, and all associated properties are trademarks or registered trademarks of Riot Games, Inc.";
+
 mod balance;
 mod capture;
 mod config;
