@@ -606,14 +606,13 @@ impl App {
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.label(RichText::new(pct(b.wr)).color(DIM));
                             tier_pill(ui, b.tier, 13.0);
-                            match b.tag {
-                                Some(Tag::Best) => {
-                                    ui.label(RichText::new("BEST").font(bold(11.5)).color(GOOD));
-                                }
-                                Some(Tag::Worst) => {
-                                    ui.label(RichText::new("WORST").font(bold(11.5)).color(BAD));
-                                }
-                                None => {}
+                            if let Some((r, of)) = b.rank {
+                                let c = match rank_band(r, of) {
+                                    1 => GOOD,
+                                    -1 => BAD,
+                                    _ => DIM,
+                                };
+                                ui.label(RichText::new(format!("{} / {of}", ordinal(r))).font(bold(11.5)).color(c));
                             }
                         });
                     });

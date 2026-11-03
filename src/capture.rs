@@ -21,6 +21,9 @@ pub struct Grabber {
     pub buf: Vec<u8>,
     pub size: (i32, i32),
     last_rect: (i32, i32, i32, i32),
+    /// DXGI failures in a row. A fullscreen switch or alt-tab can briefly leave no frame;
+    /// only give DXGI up when it keeps failing.
+    dxgi_fails: u32,
 }
 
 impl Grabber {
@@ -35,7 +38,7 @@ impl Grabber {
                 None
             }
         };
-        Grabber { dxgi, gdi: None, buf: Vec::new(), size: (0, 0), last_rect: (0, 0, 0, 0) }
+        Grabber { dxgi, gdi: None, buf: Vec::new(), size: (0, 0), last_rect: (0, 0, 0, 0), dxgi_fails: 0 }
     }
 
     pub fn backend(&self) -> &'static str {
@@ -54,13 +57,19 @@ impl Grabber {
         if let Some(d) = self.dxgi.as_mut() {
             match d.grab(x, y, w, h, &mut self.buf, same_rect) {
                 Ok(changed) => {
+                    self.dxgi_fails = 0;
                     self.size = (w, h);
                     self.last_rect = rect;
                     return changed;
                 }
                 Err(e) => {
-                    log::warn!("capture: DXGI failed ({e}); switching to GDI");
-                    self.dxgi = None;
+                    self.dxgi_fails += 1;
+                    if self.dxgi_fails >= 20 {
+                        log::warn!("capture: DXGI keeps failing ({e}); switching to GDI");
+                        self.dxgi = None;
+                    } else {
+                        log::debug!("capture: DXGI miss ({e}); GDI for this grab");
+                    }
                 }
             }
         }

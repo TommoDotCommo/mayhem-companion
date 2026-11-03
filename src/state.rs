@@ -5,12 +5,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Tag {
-    Best,
-    Worst,
-}
-
 /// One detected augment card, rated for the current champion / round / build.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Badge {
@@ -28,7 +22,9 @@ pub struct Badge {
     pub delta: f64,
     pub round: Option<u32>,
     pub global: bool,
-    pub tag: Option<Tag>,
+    /// Place among every augment of the same rarity for this champion and round
+    /// (1 = highest win rate), and how many there are.
+    pub rank: Option<(u32, u32)>,
     pub fit: Option<(Fit, Vec<String>)>,
 }
 
@@ -140,6 +136,8 @@ pub struct RelicClock {
     /// When a slot was last marked by hotkey (for press-again-to-undo).
     pub marked: [Option<std::time::Instant>; 4],
     pub before_mark: [f64; 4],
+    /// Minimap map area on screen (x, y, size in physical px), found by the scanner.
+    pub minimap: Option<(f32, f32, f32)>,
 }
 
 impl RelicClock {
@@ -154,6 +152,30 @@ impl RelicClock {
 }
 
 pub type RelicRef = Arc<Mutex<RelicClock>>;
+
+/// 1 -> "1st", 22 -> "22nd", 13 -> "13th".
+pub fn ordinal(n: u32) -> String {
+    let suffix = match (n % 10, n % 100) {
+        (_, 11..=13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    format!("{n}{suffix}")
+}
+
+/// Rank colour: top 10% green, bottom 10% red, otherwise neutral.
+pub fn rank_band(rank: u32, of: u32) -> i8 {
+    let p = if of > 1 { (rank - 1) as f64 / (of - 1) as f64 } else { 0.0 };
+    if p <= 0.1 {
+        1
+    } else if p >= 0.9 {
+        -1
+    } else {
+        0
+    }
+}
 
 /// JSON has no NaN ("no data"): send it as null.
 mod nan_as_null {

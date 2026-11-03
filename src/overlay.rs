@@ -5,7 +5,7 @@
 
 use crate::config::Config;
 use crate::model::{Fit, Tier};
-use crate::state::{Badge, RelicRef, Tag};
+use crate::state::{ordinal, rank_band, Badge, RelicRef};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -535,7 +535,7 @@ impl Overlay {
                 detail.push_str(" (all)");
             }
             let detail_t = p.text(&detail, s * 0.78, DWRITE_FONT_WEIGHT_SEMI_BOLD);
-            let tag_t = b.tag.map(|t| p.text(if t == Tag::Best { "BEST" } else { "WORST" }, s * 0.6, DWRITE_FONT_WEIGHT_BOLD));
+            let tag_t = b.rank.map(|(r, of)| p.text(&format!("{} / {of}", ordinal(r)), s * 0.62, DWRITE_FONT_WEIGHT_BOLD));
             let fit_t = b.fit.as_ref().map(|(f, cats)| {
                 let head = match f {
                     Fit::Fits => "✓ FITS BUILD",
@@ -555,12 +555,13 @@ impl Overlay {
             let x = (b.x + b.w / 2.0 - w / 2.0) as i32;
             let y = (b.y - h - b.h * 0.5) as i32;
             let tier = b.tier;
-            let border = match b.tag {
-                Some(Tag::Best) => [0x4a, 0xde, 0x80],
-                Some(Tag::Worst) => [0xf8, 0x71, 0x71],
-                None => tier.rgb(),
+            // the single best / worst augment of the whole set gets a coloured frame
+            let border = match b.rank {
+                Some((1, _)) => [0x4a, 0xde, 0x80],
+                Some((r, of)) if r == of && of > 1 => [0xf8, 0x71, 0x71],
+                _ => tier.rgb(),
             };
-            let tag = b.tag;
+            let tag = b.rank.map(|(r, of)| rank_band(r, of));
             Self::present(p, layer, x, y, w as i32, h as i32, |p| {
                 p.fill(0.5, 0.5, w - 1.0, h - 1.0, 6.0, BG, 0.95);
                 p.fill(3.0, 3.0, tier_w, row1, 4.0, tier.rgb(), 1.0);
@@ -569,7 +570,11 @@ impl Overlay {
                 if let (Some(t), Some(tag)) = (&tag_t, tag) {
                     let bx = w - 3.0 - tag_w;
                     let bh = row1 * 0.66;
-                    let rgb = if tag == Tag::Best { [0x1f, 0x7a, 0x45] } else { [0x9b, 0x2c, 0x2c] };
+                    let rgb = match tag {
+                        1 => [0x1f, 0x7a, 0x45],
+                        -1 => [0x9b, 0x2c, 0x2c],
+                        _ => [0x3a, 0x41, 0x50],
+                    };
                     p.fill(bx, 3.0 + (row1 - bh) / 2.0, tag_w, bh, 3.0, rgb, 1.0);
                     p.draw(t, bx + (tag_w - t.w) / 2.0, 3.0 + (row1 - t.h) / 2.0, [0xff, 0xff, 0xff]);
                 }
@@ -713,7 +718,7 @@ impl Overlay {
         }
     }
 
-    // ---- heal relic timers (top of the screen, scoreboard order)
+    // ---- heal relic timers: on the minimap over each relic, or a bar at the top
 
     unsafe fn render_relics(&mut self) {
         let c = *self.relics.lock().unwrap();
@@ -725,6 +730,11 @@ impl Overlay {
             }
             self.relic_key.clear();
             return;
+        }
+        if self.cfg.relic_on_minimap {
+            if let Some(m) = self.cfg.relic_minimap.map(|m| (m[0], m[1], m[2])).or(c.minimap) {
+                return self.render_relics_minimap(&c, m);
+            }
         }
         let now = c.now();
         let cells: Vec<(String, f64)> = (0..4)
@@ -801,6 +811,62 @@ impl Overlay {
             }
         });
         let layer = self.relic_layer.as_mut().unwrap();
+        if !layer.visible {
+            Self::show(layer, true);
+        }
+    }
+
+    /// A timer over each relic that's down, on the minimap (the game's own "+" icon marks
+    /// the ones that are up).
+    unsafe fn render_relics_minimap(&mut self, c: &crate::state::RelicClock, (mx, my, ms): (f32, f32, f32)) {
+        // relic centres on the Howling Abyss minimap (fraction of the map area), scoreboard
+        // order: blue inner, blue outer, red outer, red inner. Measured in game.
+        const RELIC_UV: [(f32, f32); 4] = [(0.3748, 0.6895), (0.4627, 0.5925), (0.5912, 0.4659), (0.6941, 0.3818)];
+        let now = c.now();
+        let labels: Vec<Option<(String, f64)>> = (0..4)
+            .map(|i| {
+                let rem = c.ready_at[i] - now;
+                (rem > 0.0).then(|| {
+                    let s = rem.ceil() as i64;
+                    (format!("{}:{:02}", s / 60, s % 60), rem)
+                })
+            })
+            .collect();
+        let key = format!("mm{:?}{mx}{my}{ms}", labels.iter().map(|l| l.as_ref().map(|l| &l.0)).collect::<Vec<_>>());
+        if key == self.relic_key {
+            return;
+        }
+        self.relic_key = key;
+        if labels.iter().all(|l| l.is_none()) {
+            if let Some(l) = self.relic_layer.as_mut() {
+                if l.visible {
+                    Self::show(l, false);
+                }
+            }
+            return;
+        }
+        if self.relic_layer.is_none() {
+            self.relic_layer = Some(self.new_layer());
+        }
+        let p = &mut self.painter;
+        let s = (ms * 0.042).clamp(11.0, 28.0) * self.cfg.panel_scale;
+        let texts: Vec<Option<(Text, f64)>> =
+            labels.iter().map(|l| l.as_ref().map(|(t, rem)| (p.text(t, s, DWRITE_FONT_WEIGHT_BOLD), *rem))).collect();
+        let size = ms.round() as i32;
+        let layer = self.relic_layer.as_mut().unwrap();
+        Self::present(p, layer, mx.round() as i32, my.round() as i32, size, size, |p| {
+            for (i, t) in texts.iter().enumerate() {
+                let Some((t, rem)) = t else { continue };
+                let (cx, cy) = (RELIC_UV[i].0 * ms, RELIC_UV[i].1 * ms);
+                let (bw, bh) = (t.w + s * 0.55, t.h + s * 0.2);
+                let (bx, by) = ((cx - bw / 2.0).clamp(1.0, ms - bw - 1.0), (cy - bh / 2.0).clamp(1.0, ms - bh - 1.0));
+                let side = if i < 2 { [0x3a, 0xa0, 0xff] } else { [0xff, 0x5a, 0x5a] };
+                p.fill(bx, by, bw, bh, bh * 0.3, BG, 0.92);
+                p.stroke(bx + 0.5, by + 0.5, bw - 1.0, bh - 1.0, bh * 0.3, side, 1.5);
+                let rgb = if *rem <= 10.0 { [0xf5, 0xc5, 0x18] } else { FG };
+                p.draw(t, bx + (bw - t.w) / 2.0, by + (bh - t.h) / 2.0, rgb);
+            }
+        });
         if !layer.visible {
             Self::show(layer, true);
         }

@@ -59,6 +59,7 @@ fn main() {
     match mode {
         "--scan" => scan_once(&cfg, &data, args.get(1).map(String::as_str).unwrap_or("Annie")),
         "--companion" => run_companion(cfg, data, &args),
+        "--find-minimap" => find_minimap_in(args.get(1).map(String::as_str).unwrap_or("")),
         _ => run_service(cfg, data, &args),
     }
 }
@@ -215,7 +216,7 @@ fn scan_once(cfg: &Config, data: &Arc<data::Data>, champ: &str) {
         log::info!("relics (blue inner, blue outer, red outer, red inner): {rem:?} in {} ms", t.elapsed().as_millis() / 2);
         let ctl = ScanCtl { meta: Some(meta.clone()), ratings, max_round: 4, ..Default::default() };
         for b in scan::make_badges(&hits, &meta, &ctl) {
-            log::info!("MATCH {} {} {:.1}% at ({}, {}) tag={:?} fit={:?}", b.name, b.tier.label(), b.wr * 100.0, b.x, b.y, b.tag, b.fit);
+            log::info!("MATCH {} {} {:.1}% at ({}, {}) rank={:?} fit={:?}", b.name, b.tier.label(), b.wr * 100.0, b.x, b.y, b.rank, b.fit);
         }
         log::info!(
             "timing [{}]: find+lock {} ms, strip scan {} ms ({} hits), repeat scan avg {} us, strip copy avg {} us",
@@ -230,5 +231,30 @@ fn scan_once(cfg: &Config, data: &Arc<data::Data>, champ: &str) {
     };
     if let Err(e) = run() {
         log::error!("scan: {e}");
+    }
+}
+
+/// Debug: run the minimap finder on a full-screen screenshot (PNG/JPEG) and log the result.
+fn find_minimap_in(path: &str) {
+    let Ok(img) = image::open(path) else {
+        log::error!("find-minimap: can't open {path}");
+        return;
+    };
+    let img = img.to_rgba8();
+    let (sw, sh) = (img.width() as i32, img.height() as i32);
+    for flipped in [false, true] {
+        let side = (sh * 55 / 100).min(sw);
+        let x0 = if flipped { 0 } else { sw - side };
+        let mut buf = Vec::with_capacity((side * side * 4) as usize);
+        for y in sh - side..sh {
+            for x in x0..x0 + side {
+                let p = img.get_pixel(x as u32, y as u32).0;
+                buf.extend_from_slice(&[p[2], p[1], p[0], 255]);
+            }
+        }
+        let t = std::time::Instant::now();
+        let r = scan::find_minimap(&buf, side, sh, flipped);
+        let r = r.map(|(x, y, s)| (x + if flipped { 0.0 } else { x0 as f32 }, y + (sh - side) as f32, s));
+        log::info!("find-minimap {path} flipped={flipped}: {r:?} in {} us", t.elapsed().as_micros());
     }
 }

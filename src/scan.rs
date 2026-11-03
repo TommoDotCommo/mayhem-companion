@@ -7,7 +7,7 @@
 use crate::config::{data_dir, Config};
 use crate::model::{augment_fit, norm, Meta};
 use crate::overlay::{OverlayCmd, OverlayHandle};
-use crate::state::{repaint, Badge, RelicRef, ScanMode, ScanRef, SharedRef, Tag};
+use crate::state::{repaint, Badge, RelicRef, ScanMode, ScanRef, SharedRef};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use windows::core::HSTRING;
@@ -50,6 +50,39 @@ mod tests {
         assert_eq!(parse_clock("12:34"), None); // the game clock, not a relic
         assert_eq!(parse_clock("2.5"), None);
         assert_eq!(parse_clock("Relic"), None);
+    }
+
+    /// The frame as measured at 2560x1440 (MinimapScale 2.07): gold top bar at y=968,
+    /// gold side bar at x=2089, map area 2111..2540 x 990..1418.
+    #[test]
+    fn minimap_frame() {
+        let (sw, sh) = (2560, 1440);
+        let side = sh * 55 / 100;
+        let (x0, y0) = (sw - side, sh - side);
+        for flipped in [false, true] {
+            let mut buf = vec![30u8; (side * side * 4) as usize]; // dark blue-grey world
+            let mut put = |sx: i32, sy: i32| {
+                let x = if flipped { sw - 1 - sx } else { sx } - if flipped { 0 } else { x0 };
+                let i = (((sy - y0) * side + x) * 4) as usize;
+                buf[i..i + 3].copy_from_slice(&[73, 128, 159]); // BGR gold
+            };
+            for x in 2089..2560 {
+                for y in 967..972 {
+                    put(x, y);
+                }
+            }
+            for y in 967..1440 {
+                for x in 2089..2094 {
+                    put(x, y);
+                }
+            }
+            let (x, y, s) = super::find_minimap(&buf, side, sh, flipped).expect("minimap");
+            let screen_x = if flipped { x } else { x0 as f32 + x };
+            let expect_x = if flipped { 20.0 } else { 2111.0 };
+            assert!((s - 429.0).abs() <= 2.0, "size {s}");
+            assert!((screen_x - expect_x).abs() <= 2.0, "x {screen_x}");
+            assert!((y0 as f32 + y - 990.0).abs() <= 2.0, "y {}", y0 as f32 + y);
+        }
     }
 }
 
@@ -107,6 +140,18 @@ impl Reader {
 
     pub fn backend(&self) -> &'static str {
         self.capture.backend()
+    }
+
+    /// Find the minimap's map area from its gold frame (bottom-right, or bottom-left
+    /// with FlipMiniMap). Returns (x, y, size) in screen pixels.
+    pub fn find_minimap(&mut self, flipped: bool) -> Option<(f32, f32, f32)> {
+        let (sw, sh) = self.screen;
+        let side = (sh * 55 / 100).min(sw);
+        let x0 = if flipped { 0 } else { sw - side };
+        self.capture.grab(x0, sh - side, side, side);
+        let (mx, my, s) = find_minimap(&self.capture.buf, side, sh, flipped)?;
+        let x = if flipped { mx } else { (x0 as f32 + mx).round() };
+        Some((x, (sh - side) as f32 + my, s))
     }
 
     /// OCR the last grabbed rectangle (origin x, y) into lines of words in screen coords.
@@ -520,10 +565,65 @@ impl Scanner {
     }
 }
 
+/// Minimap frame finder on a BGRA square grabbed from the bottom corner of the screen
+/// (`side` px, flush with the screen's bottom and its right edge, or left if `flipped`).
+/// The frame's gold top bar and inner side bar give the map's size; the map sits a fixed
+/// margin from the screen corner. Returns (x, y, size) within the square.
+pub fn find_minimap(buf: &[u8], side: i32, screen_h: i32, flipped: bool) -> Option<(f32, f32, f32)> {
+    if buf.len() < (side * side * 4) as usize || side < 100 {
+        return None;
+    }
+    let k = screen_h as f32 / 1440.0;
+    // x measured from the screen edge the minimap is on
+    let gold = |x: i32, y: i32| {
+        let px = if flipped { x } else { side - 1 - x };
+        let i = ((y * side + px) * 4) as usize;
+        let (b, g, r) = (buf[i] as i32, buf[i + 1] as i32, buf[i + 2] as i32);
+        r >= 90 && r - b >= 40 && g - b >= 20 && r >= g
+    };
+    let min_run = (60.0 * k).max(40.0) as i32;
+    let edge = (60.0 * k) as i32;
+    // longest gold run along a line, and where it ends (counting from the screen corner side)
+    let run = |horizontal: bool, at: i32| {
+        let (mut cur, mut best, mut start) = (0, 0, 0);
+        for t in 0..side {
+            let g = if horizontal { gold(t, at) } else { gold(at, t) };
+            cur = if g { cur + 1 } else { 0 };
+            if cur > best {
+                best = cur;
+                start = t + 1 - cur;
+            }
+        }
+        (best, start)
+    };
+    // top bar: first row (from the top) with a long gold run reaching the screen edge
+    let top = (0..side - edge).find(|&y| {
+        let (n, start) = run(true, y);
+        n >= min_run && start <= edge
+    })?;
+    // inner side bar: the column furthest from the screen edge with a long gold run
+    // reaching the bottom
+    let side_col = (0..side).rev().find(|&d| {
+        let (n, start) = run(false, d);
+        n >= min_run && start + n >= side - edge
+    })?;
+    // measured at 2560x1440: frame bar to map 22 px; map to screen edge 20 px, to bottom 22 px
+    let (frame, margin_side, margin_bottom) = (22.0 * k, 20.0 * k, 22.0 * k);
+    let size_x = side_col as f32 + 1.0 - frame - margin_side;
+    let size_y = side as f32 - margin_bottom - (top as f32 + frame);
+    if size_x < 80.0 || (size_x - size_y).abs() > 8.0 * k + 3.0 {
+        return None;
+    }
+    let s = ((size_x + size_y) / 2.0).round();
+    let y = side as f32 - margin_bottom - s;
+    let x = if flipped { margin_side } else { side as f32 - margin_side - s };
+    Some((x, y, s))
+}
+
 /// Rate detected cards for the current champion, pick round and build.
 pub fn make_badges(hits: &[Hit], meta: &Meta, ctl: &crate::state::ScanCtl) -> Vec<Badge> {
     let round = ctl.round();
-    let mut out: Vec<Badge> = hits
+    hits
         .iter()
         .map(|h| {
             let info = meta.augs.get(&h.id.to_string());
@@ -544,6 +644,23 @@ pub fn make_badges(hits: &[Hit], meta: &Meta, ctl: &crate::state::ScanCtl) -> Ve
                 delta: f64::NAN,
                 games: 0.0,
             });
+            // rank against every augment of the same rarity (one offer = one rarity)
+            let rank = info.filter(|_| r.delta.is_finite()).map(|info| {
+                let (mut of, mut above) = (0u32, 0u32);
+                for (id, ar) in ctl.ratings.iter() {
+                    if meta.augs.get(&id.to_string()).map(|a| a.rarity == info.rarity) != Some(true) {
+                        continue;
+                    }
+                    let d = ar.at_round(Some(round)).0.delta;
+                    if d.is_finite() {
+                        of += 1;
+                        if d > r.delta {
+                            above += 1;
+                        }
+                    }
+                }
+                (above + 1, of.max(above + 1))
+            });
             Badge {
                 aug_id: h.id,
                 name,
@@ -556,21 +673,43 @@ pub fn make_badges(hits: &[Hit], meta: &Meta, ctl: &crate::state::ScanCtl) -> Ve
                 delta: r.delta,
                 round: used_round,
                 global,
-                tag: None,
+                rank,
                 fit,
             }
         })
-        .collect();
-    let mut ranked: Vec<usize> = (0..out.len()).filter(|i| out[*i].delta.is_finite()).collect();
-    ranked.sort_by(|a, b| out[*a].delta.total_cmp(&out[*b].delta));
-    if ranked.len() >= 2 {
-        let (lo, hi) = (ranked[0], ranked[ranked.len() - 1]);
-        if out[hi].delta - out[lo].delta > 0.002 {
-            out[hi].tag = Some(Tag::Best);
-            out[lo].tag = Some(Tag::Worst);
-        }
+        .collect()
+}
+
+/// League's "Flip minimap" setting puts the minimap bottom-left.
+fn minimap_flipped(league_dir: &str) -> bool {
+    std::fs::read_to_string(std::path::Path::new(league_dir).join("Config").join("game.cfg"))
+        .map(|t| t.lines().any(|l| l.trim().replace(' ', "").eq_ignore_ascii_case("FlipMiniMap=1")))
+        .unwrap_or(false)
+}
+
+/// Look for the minimap now and then while relic timers run (it can't be found while
+/// dead: the screen goes grey). Keeps the last good position.
+fn track_minimap(cfg: &Config, scanner: &mut Scanner, relics: &RelicRef, last: &mut Instant) {
+    if !cfg.relic_timers || !cfg.relic_on_minimap || cfg.relic_minimap.is_some() {
+        return;
     }
-    out
+    let known = relics.lock().unwrap().minimap;
+    let every = if known.is_some() { 30 } else { 3 };
+    if !relics.lock().unwrap().active || last.elapsed() < Duration::from_secs(every) {
+        return;
+    }
+    *last = Instant::now();
+    let t = Instant::now();
+    let found = scanner.reader().find_minimap(minimap_flipped(&cfg.league_dir));
+    if let Some(m) = found {
+        let moved = known.map(|k| (k.0 - m.0).abs() > 3.0 || (k.1 - m.1).abs() > 3.0 || (k.2 - m.2).abs() > 3.0);
+        if moved.unwrap_or(true) {
+            log::info!("minimap at x={} y={} size={} ({} us)", m.0, m.1, m.2, t.elapsed().as_micros());
+            relics.lock().unwrap().minimap = Some(m);
+        }
+    } else if known.is_none() {
+        log::debug!("minimap not found");
+    }
 }
 
 fn key_held(vk: u32) -> bool {
@@ -588,6 +727,7 @@ pub fn spawn(cfg: Config, ctl: ScanRef, shared: SharedRef, relics: RelicRef, ove
             let mut shown: Vec<(u32, i32, i32)> = vec![];
             let mut misses = 0u32;
             let mut last_full = Instant::now() - Duration::from_secs(60);
+            let mut last_minimap = Instant::now() - Duration::from_secs(60);
             loop {
                 let (mode, meta) = {
                     let c = ctl.lock().unwrap();
@@ -631,6 +771,7 @@ pub fn spawn(cfg: Config, ctl: ScanRef, shared: SharedRef, relics: RelicRef, ove
                 if relics.lock().unwrap().active && key_held(scoreboard_vk) {
                     scanner.relic_sync(&relics);
                 }
+                track_minimap(&cfg, scanner, &relics, &mut last_minimap);
                 let t0 = Instant::now();
                 // a full sweep reads ~13 strips, so only fall back to it now and then
                 let full = (!scanner.has_band() && last_full.elapsed() > Duration::from_secs(2))
@@ -656,7 +797,14 @@ pub fn spawn(cfg: Config, ctl: ScanRef, shared: SharedRef, relics: RelicRef, ove
                         shown = key;
                         log::info!(
                             "cards: {}",
-                            badges.iter().map(|b| format!("{} {}", b.name, b.tier.label())).collect::<Vec<_>>().join(", ")
+                            badges
+                                .iter()
+                                .map(|b| match b.rank {
+                                    Some((r, of)) => format!("{} {} ({r}/{of})", b.name, b.tier.label()),
+                                    None => format!("{} {}", b.name, b.tier.label()),
+                                })
+                                .collect::<Vec<_>>()
+                                .join(", ")
                         );
                         overlay.send(OverlayCmd::Badges(badges.clone()));
                         shared.write().unwrap().cards = badges;

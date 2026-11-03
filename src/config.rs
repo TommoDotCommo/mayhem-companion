@@ -68,6 +68,11 @@ pub struct Config {
     pub relic_hotkeys: Vec<String>,
     /// Hold this to show the scoreboard: the relic timers on it are read to sync the bar.
     pub scoreboard_key: String,
+    /// Draw each timer on the minimap, over its relic. Off (or minimap not found yet):
+    /// a bar at the top of the screen.
+    pub relic_on_minimap: bool,
+    /// Minimap map area [x, y, size] in screen pixels, if auto-detection gets it wrong.
+    pub relic_minimap: Option<[f32; 3]>,
     /// Bar position: x offset from screen centre, y from the top (both at 100% scaling).
     pub relic_x: i32,
     pub relic_y: i32,
@@ -109,6 +114,8 @@ impl Default for Config {
             relic_beam_delay: 2.5,
             relic_hotkeys: vec!["alt+1".into(), "alt+2".into(), "alt+3".into(), "alt+4".into()],
             scoreboard_key: "tab".into(),
+            relic_on_minimap: true,
+            relic_minimap: None,
             relic_x: 0,
             relic_y: 6,
         }

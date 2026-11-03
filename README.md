@@ -4,14 +4,14 @@ A native Windows app for ARAM: Mayhem, written in Rust. It's a single 7 MB `.exe
 
 - **In game:** when augment cards come up, each one gets a badge:
   - **Tier and win rate** (**S+ S A B C D F**) for your champion, at the pick round you're on (R1–R4).
-  - **BEST / WORST** among the offered cards.
+  - **Rank** among every augment of that rarity for your champion and round, e.g. **3rd / 58**. The top 10% are green and the bottom 10% red; the single best augment gets a green frame and the single worst a red one.
   - **Build fit** with the augment's category: **✓ FITS BUILD · AP**, **✗ OFF-BUILD · Crit** or **• ANY BUILD · Economy**.
   - Rerolls update the badges straight away. **F8** toggles a panel with your champion's best augments and builds.
-- **Heal relic timers:** a small bar at the top of the screen shows all four Howling Abyss relics in scoreboard order (blue inner, blue outer, red outer, red inner), with your side marked.
+- **Heal relic timers:** on the minimap, a countdown sits on each relic that's down; relics that are up keep the game's own "+" icon. The minimap is found automatically from its frame (either corner, any size), or set `relic_minimap` to `[x, y, size]`. Until it's found, or with `relic_on_minimap` off, a bar at the top of the screen shows all four.
   - **First spawns:** automatic from the game clock (1:45 outer, 2:30 inner).
-  - **Respawns:** holding **Tab** syncs all four from the game's own scoreboard timers; the bar keeps counting after you let go.
+  - **Respawns:** holding **Tab** syncs all four from the game's own scoreboard timers; they keep counting after you let go.
   - **Manual backup:** **Alt+1–4** marks a relic taken (press again within 3 s to undo).
-  - Respawning relics turn yellow for their last 10 seconds, then show a green UP.
+  - Timers turn yellow for their last 10 seconds.
 - **Champ select:** the companion window opens with your pick, bench and team, each with a tier and win rate. The bench shows the win-rate gap against your pick, and you swap with one click; you can also reroll from there. Your build is imported as a `[Mayhem]` item set and your summoner spells are set, keeping Flash on the key you already use.
 - **Browse:** a champion tier list, with each champion's augments (by rarity and pick round) and core builds that import with one click. There's also an augment tier list showing which champions each augment is best and worst on.
 
@@ -68,7 +68,7 @@ The OCR engine is created when a Mayhem game starts and released a minute after 
 
 ## Tiers
 
-Each augment's win rate on your champion is compared with that champion's average. Small samples are pulled toward the average (`smoothing_games`, 300), and each pick round's sample is pulled toward the augment's overall result. The shown win rate is that adjusted number, so BEST always has the highest one.
+Each augment's win rate on your champion is compared with that champion's average. Small samples are pulled toward the average (`smoothing_games`, 300), and each pick round's sample is pulled toward the augment's overall result. The shown win rate is that adjusted number, and the rank orders augments by it.
 
 Cut-offs: S+ ≥ +3.5%, S ≥ +2%, A ≥ +0.8%, B ≥ −1%, C ≥ −2.5%, D ≥ −4%, and F below that. Champions use the same idea against 50%.
 
