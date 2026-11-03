@@ -13,7 +13,7 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -32,7 +32,7 @@ jobs:
           "$h  mayhem-companion.exe" | Out-File -Encoding ascii target\release\mayhem-companion.exe.sha256
           Get-Content target\release\mayhem-companion.exe.sha256
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: mayhem-companion
           path: |
