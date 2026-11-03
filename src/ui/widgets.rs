@@ -185,3 +185,31 @@ pub fn delta_text(d: f64) -> (String, Color32) {
 pub fn text_at(ui: &Ui, pos: egui::Pos2, align: Align2, text: &str, font: FontId, color: Color32) -> Rect {
     ui.painter().text(pos, align, text, font, color)
 }
+
+/// A small labelled chip (hoverable).
+pub fn chip(ui: &mut Ui, text: &str, fg: Color32, bg: Color32) -> Response {
+    let galley = ui.painter().layout_no_wrap(text.to_string(), semi(12.5), fg);
+    let pad = vec2(8.0, 3.5);
+    let (rect, resp) = ui.allocate_exact_size(galley.size() + pad * 2.0, Sense::hover());
+    ui.painter().rect_filled(rect, Rounding::same(5.0), bg);
+    ui.painter().galley(rect.min + pad, galley, fg);
+    resp
+}
+
+/// Win-rate colour by how far it is from a baseline (the champion's average):
+/// strong green / green / neutral / orange / red.
+pub fn wr_color(delta: f64) -> Color32 {
+    if !delta.is_finite() {
+        DIM
+    } else if delta >= 0.025 {
+        GOOD
+    } else if delta >= 0.008 {
+        Color32::from_rgb(0xa3, 0xe6, 0xb5)
+    } else if delta > -0.008 {
+        TEXT
+    } else if delta > -0.025 {
+        WARN
+    } else {
+        BAD
+    }
+}

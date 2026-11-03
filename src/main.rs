@@ -7,6 +7,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod balance;
 mod capture;
 mod config;
 mod data;
@@ -60,6 +61,23 @@ fn main() {
         "--scan" => scan_once(&cfg, &data, args.get(1).map(String::as_str).unwrap_or("Annie")),
         "--companion" => run_companion(cfg, data, &args),
         "--render" => render_debug(&cfg, &data, &args[1..]),
+        "--balance" => match data.balance() {
+            Ok(b) => {
+                for id in [145u32, 12, 432, 157, 103, 81, 222] {
+                    if let Some(c) = b.get(&id) {
+                        let mods: Vec<String> = c
+                            .mods
+                            .iter()
+                            .map(|m| format!("{} {} (aram {:?}, mayhem {:?})", m.stat.label(), m.value_text(), m.aram, m.mayhem))
+                            .collect();
+                        log::info!("balance {id}: {} | notes: {:?}", mods.join("; "), c.notes);
+                    } else {
+                        log::info!("balance {id}: none");
+                    }
+                }
+            }
+            Err(e) => log::error!("balance: {e}"),
+        },
         "--find-minimap" => find_minimap_in(args.get(1).map(String::as_str).unwrap_or("")),
         _ => run_service(cfg, data, &args),
     }

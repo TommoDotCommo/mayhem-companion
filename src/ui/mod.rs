@@ -61,6 +61,8 @@ pub struct App {
     sort: ChampSort,
     selected: Option<u32>,
     round: Option<u32>,
+    /// Champion page: show every augment instead of the top few per rarity.
+    all_augs: bool,
     aug_search: String,
     aug_rarity: [bool; 3],
     aug_cat: Option<String>,
@@ -88,6 +90,7 @@ impl App {
             sort: ChampSort::Tier,
             selected: None,
             round: None,
+            all_augs: false,
             aug_search: String::new(),
             aug_rarity: [true; 3],
             aug_cat: None,
@@ -272,117 +275,36 @@ impl App {
         let info = meta.champs.get(&cid.to_string()).cloned().unwrap_or_default();
         let crating = champion_rating(&info, &self.cfg);
 
-        // header
+        let base = if info.wr > 0.0 { info.wr } else { 0.5 };
+
+        // header: portrait, name, tier, win rate, ARAM / Mayhem balance
         ui.horizontal(|ui| {
             let tex = self.tex(ui.ctx(), &info.image);
-            icon(ui, tex, 72.0, 10.0);
+            icon(ui, tex, 76.0, 10.0);
             ui.add_space(6.0);
             ui.vertical(|ui| {
-                ui.add_space(4.0);
+                ui.add_space(2.0);
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(&info.name_en).font(bold(26.0)));
                     ui.add_space(4.0);
                     tier_pill(ui, crating.tier, 16.0);
+                    ui.add_space(6.0);
+                    ui.label(RichText::new(pct(info.wr)).font(bold(18.0)).color(wr_color(info.wr - 0.5)));
+                    ui.label(
+                        RichText::new(format!("win rate · {:.0}k games · Mayhem {}", info.g / 1000.0, meta.patch_prefix))
+                            .font(reg(13.5))
+                            .color(DIM),
+                    );
                 });
-                ui.label(
-                    RichText::new(format!(
-                        "{} win rate · {:.0}k games · Mayhem {}",
-                        pct(info.wr),
-                        info.g / 1000.0,
-                        meta.patch_prefix
-                    ))
-                    .font(reg(13.5))
-                    .color(DIM),
-                );
+                ui.add_space(2.0);
+                self.balance_row(ui, cid);
             });
         });
 
         ScrollArea::vertical().id_salt(("detail", cid)).auto_shrink([false, false]).show(ui, |ui| {
             ui.set_width(ui.available_width() - 6.0);
-            // ---- augments
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                section(ui, "AUGMENTS");
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    for (r, label) in [(Some(4), "4th"), (Some(3), "3rd"), (Some(2), "2nd"), (Some(1), "1st"), (None, "All picks")].iter() {
-                        let on = self.round == *r;
-                        let b = egui::Button::new(RichText::new(*label).font(semi(12.5)).color(if on { TEXT } else { DIM }))
-                            .fill(if on { ACCENT.linear_multiply(0.45) } else { CARD })
-                            .rounding(Rounding::same(5.0));
-                        if ui.add(b).clicked() {
-                            self.round = *r;
-                        }
-                    }
-                    ui.label(RichText::new("Pick round").font(reg(12.5)).color(FAINT));
-                });
-            });
-            let round = self.round;
-            let cols: Vec<(usize, Vec<(u32, Rating)>)> = RARITIES
-                .iter()
-                .enumerate()
-                .map(|(i, (key, ..))| {
-                    let mut list: Vec<(u32, Rating)> = detail
-                        .top
-                        .get(*key)
-                        .map(|l| l.iter().filter_map(|a| ratings.get(&a.id).map(|r| (a.id, r.at_round(round).0))).collect())
-                        .unwrap_or_default();
-                    list.sort_by(|a, b| b.1.delta.total_cmp(&a.1.delta));
-                    (i, list)
-                })
-                .collect();
-            ui.columns(3, |uis| {
-                for (i, list) in &cols {
-                    let ui = &mut uis[*i];
-                    let (_, title, color) = RARITIES[*i];
-                    card(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.label(RichText::new(title.to_uppercase()).font(bold(12.5)).color(rgb(color)));
-                        ui.add_space(4.0);
-                        for (id, r) in list.iter().take(12) {
-                            self.aug_line(ui, meta, *id, *r);
-                        }
-                        if list.len() > 12 {
-                            ui.add_space(6.0);
-                            ui.label(RichText::new("AVOID").font(bold(11.5)).color(BAD.linear_multiply(0.8)));
-                            for (id, r) in list.iter().rev().take(3) {
-                                self.aug_line(ui, meta, *id, *r);
-                            }
-                        }
-                    });
-                }
-            });
-
-            // ---- builds
-            section(ui, "CORE BUILDS");
-            for (i, g) in detail.clusters.groups.iter().take(3).enumerate() {
-                card(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new(&g.name_en).font(bold(15.0)));
-                        ui.label(RichText::new(format!("{} WR · {:.0}% of games", pct(g.wr), g.pick * 100.0)).font(reg(13.0)).color(DIM));
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            let b = egui::Button::new(RichText::new("Import to client").font(semi(13.0)))
-                                .fill(if import_ok { ACCENT.linear_multiply(0.55) } else { CARD_HI });
-                            let resp = ui.add_enabled(import_ok, b);
-                            let resp = resp.on_disabled_hover_text("Imports during champ select, for your current champion");
-                            if resp.clicked() {
-                                let _ = self.tx.send(Msg::Ui(UiCmd::ImportBuild { champ: cid, cluster: i }));
-                            }
-                        });
-                    });
-                    ui.add_space(4.0);
-                    ui.horizontal_wrapped(|ui| {
-                        for it in &g.core {
-                            self.item_icon(ui, meta, it.id, 44.0, None);
-                        }
-                        ui.label(RichText::new("→").font(bold(18.0)).color(FAINT));
-                        for it in g.options.iter().take(5) {
-                            self.item_icon(ui, meta, it.id, 38.0, Some((it.wr, it.pick)));
-                        }
-                    });
-                });
-                ui.add_space(6.0);
-            }
+            self.builds(ui, meta, &detail, cid, base, import_ok);
+            self.augments(ui, meta, &detail, &ratings);
 
             // ---- boots / spells / items
             section(ui, "BOOTS · SPELLS · STRONGEST ITEMS");
@@ -391,7 +313,7 @@ impl App {
                 ui.horizontal_wrapped(|ui| {
                     for b in detail.boots.top.iter().take(3) {
                         if let Some(it) = b.items.first() {
-                            self.item_icon(ui, meta, it.id, 38.0, Some((b.wr, b.pick)));
+                            self.item_icon(ui, meta, it.id, 38.0, Some((b.wr, b.pick)), base);
                         }
                     }
                     ui.add_space(18.0);
@@ -404,19 +326,272 @@ impl App {
                                     icon(ui, tex, 30.0, 5.0).on_hover_text(&it.name_en);
                                 }
                             });
-                            ui.label(RichText::new(format!("{} · {:.0}%", pct(s.wr), s.pick * 100.0)).font(reg(11.5)).color(DIM));
+                            ui.label(RichText::new(pct(s.wr)).font(semi(11.5)).color(wr_color(s.wr - base)));
                         });
                         ui.add_space(8.0);
                     }
                     ui.add_space(18.0);
                     for s in detail.single_items.top.iter().take(8) {
                         if let Some(it) = s.items.first() {
-                            self.item_icon(ui, meta, it.id, 38.0, Some((s.wr, s.pick)));
+                            self.item_icon(ui, meta, it.id, 38.0, Some((s.wr, s.pick)), base);
                         }
                     }
                 });
             });
             ui.add_space(16.0);
+        });
+    }
+
+    /// ARAM / Mayhem balance as chips: green = buff, red = nerf. Hover for the breakdown.
+    fn balance_row(&mut self, ui: &mut Ui, cid: u32) {
+        let Some(all) = self.data.balance_cached() else {
+            if let Some(e) = self.data.load_error("balance") {
+                ui.label(RichText::new(format!("Balance changes unavailable: {e}")).font(reg(12.0)).color(FAINT));
+            }
+            self.data.load_async("balance".into(), |d| d.balance().map(|_| ()), repaint);
+            return;
+        };
+        let b = all.get(&cid).cloned().unwrap_or_default();
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 5.0;
+            let live: Vec<_> = b.mods.iter().filter(|m| m.value.abs() > 1e-6).collect();
+            if live.is_empty() && b.notes.is_empty() {
+                ui.label(RichText::new("No ARAM balance changes").font(reg(12.5)).color(FAINT));
+            }
+            for m in &live {
+                let (fg, bg, arrow) = if m.is_buff() {
+                    (GOOD, Color32::from_rgb(0x15, 0x33, 0x22), "▲")
+                } else {
+                    (BAD, Color32::from_rgb(0x3a, 0x1a, 0x1c), "▼")
+                };
+                let resp = chip(ui, &format!("{arrow} {} {}", m.stat.label(), m.value_text()), fg, bg);
+                let src = match (m.aram, m.mayhem) {
+                    (Some(_), Some(_)) => "Mayhem override (replaces the ARAM value)",
+                    (None, Some(_)) => "Mayhem only",
+                    _ => "ARAM balance (applies in Mayhem too)",
+                };
+                resp.on_hover_text(src);
+            }
+            // ARAM changes Mayhem removes
+            let removed: Vec<String> = b
+                .mods
+                .iter()
+                .filter(|m| m.value.abs() <= 1e-6)
+                .filter_map(|m| m.aram.map(|a| format!("{} {}", m.stat.label(), crate::balance::Modifier { value: a, ..m.clone() }.value_text())))
+                .collect();
+            if !removed.is_empty() {
+                chip(ui, "ARAM changes removed", DIM, CARD_HI)
+                    .on_hover_text(format!("Mayhem sets these back to normal: {}", removed.join(", ")));
+            }
+            if !b.notes.is_empty() {
+                let notes = b.notes.clone();
+                chip(ui, &format!("✦ {} Mayhem ability changes", notes.len()), ACCENT, CARD_HI).on_hover_ui(|ui| {
+                    ui.set_max_width(420.0);
+                    ui.label(RichText::new("Mayhem changes").font(bold(14.0)));
+                    for n in &notes {
+                        ui.label(RichText::new(format!("• {n}")).font(reg(13.0)));
+                    }
+                });
+            }
+        });
+    }
+
+    /// One card per build style (the same pages the import creates), win rates coloured
+    /// against the champion's average.
+    fn builds(&mut self, ui: &mut Ui, meta: &Meta, detail: &ChampDetail, cid: u32, base: f64, import_ok: bool) {
+        let groups = &detail.clusters.groups;
+        let mut styles: Vec<(String, Vec<usize>)> = vec![];
+        for (i, g) in groups.iter().enumerate() {
+            let name = if g.name_en.is_empty() { "Build".to_string() } else { g.name_en.clone() };
+            match styles.iter_mut().find(|(n, _)| *n == name) {
+                Some((_, v)) => v.push(i),
+                None => styles.push((name, vec![i])),
+            }
+        }
+        styles.truncate(4);
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            section(ui, "BUILDS");
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                for (d, label) in [(-0.03, "worse"), (0.0, "average"), (0.03, "better")] {
+                    ui.label(RichText::new(label).font(semi(12.0)).color(wr_color(d)));
+                }
+                ui.label(RichText::new(format!("win rate vs this champion's {}:", pct(base))).font(reg(12.0)).color(FAINT));
+            });
+        });
+        if styles.is_empty() {
+            ui.label(RichText::new("No build data yet this patch").color(DIM));
+            return;
+        }
+        let best = styles
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, v))| groups[v[0]].g >= 1000.0)
+            .max_by(|a, b| groups[a.1 .1[0]].wr.total_cmp(&groups[b.1 .1[0]].wr))
+            .map(|(i, _)| i);
+        let popular = styles
+            .iter()
+            .enumerate()
+            .max_by(|a, b| {
+                let p = |v: &Vec<usize>| v.iter().map(|i| groups[*i].pick).sum::<f64>();
+                p(&a.1 .1).total_cmp(&p(&b.1 .1))
+            })
+            .map(|(i, _)| i);
+        for (si, (name, idx)) in styles.iter().enumerate() {
+            let main = &groups[idx[0]];
+            let share: f64 = idx.iter().map(|i| groups[*i].pick).sum();
+            let games: f64 = idx.iter().map(|i| groups[*i].g).sum();
+            card(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(name).font(bold(16.0)));
+                    if best == Some(si) && styles.len() > 1 {
+                        chip(ui, "HIGHEST WIN RATE", GOOD, Color32::from_rgb(0x15, 0x33, 0x22));
+                    }
+                    if popular == Some(si) && styles.len() > 1 {
+                        chip(ui, "MOST PLAYED", ACCENT, CARD_HI);
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let b = egui::Button::new(RichText::new("Import to client").font(semi(13.0)))
+                            .fill(if import_ok { ACCENT.linear_multiply(0.55) } else { CARD_HI });
+                        let resp = ui.add_enabled(import_ok, b).on_disabled_hover_text("Imports during champ select, for your current champion");
+                        if resp.clicked() {
+                            let _ = self.tx.send(Msg::Ui(UiCmd::ImportBuild { champ: cid, cluster: idx[0] }));
+                        }
+                    });
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(pct(main.wr)).font(bold(24.0)).color(wr_color(main.wr - base)));
+                    let (d, _) = delta_text(main.wr - base);
+                    ui.label(RichText::new(format!("{d} vs avg")).font(semi(13.0)).color(wr_color(main.wr - base)));
+                    ui.label(
+                        RichText::new(format!("·  {:.1}k games  ·  {:.0}% of players", games / 1000.0, share * 100.0))
+                            .font(reg(13.0))
+                            .color(DIM),
+                    );
+                });
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new("CORE").font(bold(11.0)).color(FAINT));
+                        ui.horizontal(|ui| {
+                            for it in &main.core {
+                                self.item_icon(ui, meta, it.id, 46.0, None, base);
+                            }
+                        });
+                    });
+                    let rest: Vec<u32> =
+                        main.completion.iter().map(|i| i.id).filter(|id| !main.core.iter().any(|c| c.id == *id)).collect();
+                    if !rest.is_empty() {
+                        ui.label(RichText::new("→").font(bold(20.0)).color(FAINT));
+                        ui.vertical(|ui| {
+                            ui.label(RichText::new("FULL BUILD").font(bold(11.0)).color(FAINT));
+                            ui.horizontal(|ui| {
+                                for id in rest {
+                                    self.item_icon(ui, meta, id, 38.0, None, base);
+                                }
+                            });
+                        });
+                    }
+                    if !main.options.is_empty() {
+                        ui.add_space(14.0);
+                        ui.vertical(|ui| {
+                            ui.label(RichText::new("NEXT ITEM OPTIONS").font(bold(11.0)).color(FAINT));
+                            ui.horizontal(|ui| {
+                                for it in main.options.iter().take(6) {
+                                    self.item_icon(ui, meta, it.id, 34.0, Some((it.wr, it.pick)), base);
+                                }
+                            });
+                        });
+                    }
+                });
+                // other core pairs of the same style
+                for vi in idx.iter().skip(1) {
+                    let v = &groups[*vi];
+                    ui.add_space(2.0);
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Variant").font(semi(12.0)).color(FAINT));
+                        ui.spacing_mut().item_spacing.x = 3.0;
+                        for it in &v.core {
+                            let tex = self.tex(ui.ctx(), &meta.item_icon(it.id));
+                            icon(ui, tex, 26.0, 4.0).on_hover_text(meta.item_name(it.id));
+                        }
+                        ui.add_space(8.0);
+                        ui.label(RichText::new(pct(v.wr)).font(bold(14.0)).color(wr_color(v.wr - base)));
+                        ui.label(RichText::new(format!("{:.1}k games", v.g / 1000.0)).font(reg(12.0)).color(DIM));
+                    });
+                }
+            });
+            ui.add_space(6.0);
+        }
+    }
+
+    /// The best few augments per rarity; everything else one click away.
+    fn augments(&mut self, ui: &mut Ui, meta: &Meta, detail: &ChampDetail, ratings: &HashMap<u32, AugRating>) {
+        ui.horizontal(|ui| {
+            section(ui, "AUGMENTS");
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                for (r, label) in [(Some(4), "4th"), (Some(3), "3rd"), (Some(2), "2nd"), (Some(1), "1st"), (None, "All picks")].iter() {
+                    let on = self.round == *r;
+                    let b = egui::Button::new(RichText::new(*label).font(semi(12.5)).color(if on { TEXT } else { DIM }))
+                        .fill(if on { ACCENT.linear_multiply(0.45) } else { CARD })
+                        .rounding(Rounding::same(5.0));
+                    if ui.add(b).clicked() {
+                        self.round = *r;
+                    }
+                }
+                ui.label(RichText::new("Pick round").font(reg(12.5)).color(FAINT));
+            });
+        });
+        let round = self.round;
+        let cols: Vec<(usize, Vec<(u32, Rating)>)> = RARITIES
+            .iter()
+            .enumerate()
+            .map(|(i, (key, ..))| {
+                let mut list: Vec<(u32, Rating)> = detail
+                    .top
+                    .get(*key)
+                    .map(|l| l.iter().filter_map(|a| ratings.get(&a.id).map(|r| (a.id, r.at_round(round).0))).collect())
+                    .unwrap_or_default();
+                list.sort_by(|a, b| b.1.delta.total_cmp(&a.1.delta));
+                (i, list)
+            })
+            .collect();
+        let total: usize = cols.iter().map(|(_, l)| l.len()).sum();
+        let all = self.all_augs;
+        ui.columns(3, |uis| {
+            for (i, list) in &cols {
+                let ui = &mut uis[*i];
+                let (_, title, color) = RARITIES[*i];
+                card(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(title.to_uppercase()).font(bold(12.5)).color(rgb(color)));
+                        ui.label(RichText::new(format!("{}", list.len())).font(reg(12.0)).color(FAINT));
+                    });
+                    ui.add_space(4.0);
+                    let n = if all { list.len() } else { 4 };
+                    for (id, r) in list.iter().take(n) {
+                        self.aug_line(ui, meta, *id, *r);
+                    }
+                    if !all && list.len() > 8 {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new("AVOID").font(bold(11.0)).color(BAD.linear_multiply(0.8)));
+                        for (id, r) in list.iter().rev().take(2) {
+                            self.aug_line(ui, meta, *id, *r);
+                        }
+                    }
+                });
+            }
+        });
+        ui.add_space(4.0);
+        ui.vertical_centered(|ui| {
+            let label = if all { "Show top picks only  ▴".to_string() } else { format!("Show all {total} augments  ▾") };
+            let b = egui::Button::new(RichText::new(label).font(semi(13.0)).color(ACCENT)).fill(CARD).rounding(Rounding::same(6.0));
+            if ui.add(b).clicked() {
+                self.all_augs = !self.all_augs;
+            }
         });
     }
 
@@ -431,7 +606,7 @@ impl App {
         let url = meta.aug_icon(id).unwrap_or_default();
         let tex = self.tex(ui.ctx(), &url);
         paint_icon(ui, icon_rect, tex, 4.0);
-        let wr = text_at(ui, pos2(rect.right(), rect.center().y), Align2::RIGHT_CENTER, &pct(r.wr), reg(12.5), DIM);
+        let wr = text_at(ui, pos2(rect.right(), rect.center().y), Align2::RIGHT_CENTER, &pct(r.wr), semi(12.5), wr_color(r.delta));
         let pill = tier_pill_at(ui, pos2(wr.left() - 40.0, rect.center().y), r.tier, 12.5);
         let _ = pill;
         let max_name = (wr.left() - 46.0) - (icon_rect.right() + 8.0);
@@ -449,7 +624,7 @@ impl App {
         });
     }
 
-    fn item_icon(&mut self, ui: &mut Ui, meta: &Meta, id: u32, size: f32, stats: Option<(f64, f64)>) {
+    fn item_icon(&mut self, ui: &mut Ui, meta: &Meta, id: u32, size: f32, stats: Option<(f64, f64)>, base: f64) {
         let url = meta.item_icon(id);
         let tex = self.tex(ui.ctx(), &url);
         let name = meta.item_name(id);
@@ -459,11 +634,12 @@ impl App {
             resp.on_hover_ui(|ui| {
                 ui.label(RichText::new(&name).font(bold(14.0)));
                 if let Some((wr, pick)) = stats {
-                    ui.label(RichText::new(format!("{} WR · {:.0}% pick", pct(wr), pick * 100.0)).color(DIM));
+                    let (d, _) = delta_text(wr - base);
+                    ui.label(RichText::new(format!("{} WR ({d} vs avg) · {:.0}% pick", pct(wr), pick * 100.0)).color(DIM));
                 }
             });
             if let Some((wr, _)) = stats {
-                ui.label(RichText::new(pct(wr)).font(reg(11.0)).color(DIM));
+                ui.label(RichText::new(pct(wr)).font(semi(11.5)).color(wr_color(wr - base)));
             }
         });
     }

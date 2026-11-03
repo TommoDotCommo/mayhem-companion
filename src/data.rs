@@ -16,6 +16,7 @@ pub struct Data {
     champs: RwLock<HashMap<u32, Arc<ChampDetail>>>,
     items: RwLock<Option<Arc<HashMap<String, DdItem>>>>,
     aug_stats: RwLock<Option<Arc<AugStatsFile>>>,
+    balance: RwLock<Option<Arc<crate::balance::Balance>>>,
     in_flight: Mutex<HashSet<String>>,
     failed: Mutex<HashMap<String, (Instant, String)>>,
     meta_lock: Mutex<()>,
@@ -38,6 +39,7 @@ impl Data {
             champs: RwLock::new(HashMap::new()),
             items: RwLock::new(None),
             aug_stats: RwLock::new(None),
+            balance: RwLock::new(None),
             in_flight: Mutex::new(HashSet::new()),
             failed: Mutex::new(HashMap::new()),
             meta_lock: Mutex::new(()),
@@ -152,6 +154,26 @@ impl Data {
 
     pub fn aug_stats_cached(&self) -> Option<Arc<AugStatsFile>> {
         self.aug_stats.read().unwrap().clone()
+    }
+
+    /// ARAM + Mayhem champion balance changes (League of Legends Wiki, refreshed daily).
+    pub fn balance(&self) -> Result<Arc<crate::balance::Balance>, String> {
+        if let Some(b) = self.balance.read().unwrap().as_ref() {
+            return Ok(b.clone());
+        }
+        let day = Some(Duration::from_secs(24 * 3600));
+        let wiki = "https://wiki.leagueoflegends.com/en-us";
+        let lua = self.fetch("wiki-champion-data.lua", &format!("{wiki}/Module:ChampionData/data?action=raw"), day)?;
+        let page = self.fetch("wiki-aram-mayhem.txt", &format!("{wiki}/ARAM:_Mayhem?action=raw"), day)?;
+        let b = crate::balance::build(&String::from_utf8_lossy(&lua), &String::from_utf8_lossy(&page));
+        log::info!("balance: {} champions with ARAM/Mayhem changes", b.len());
+        let b = Arc::new(b);
+        *self.balance.write().unwrap() = Some(b.clone());
+        Ok(b)
+    }
+
+    pub fn balance_cached(&self) -> Option<Arc<crate::balance::Balance>> {
+        self.balance.read().unwrap().clone()
     }
 
     /// Run a load on a background thread once; failures back off for 30 s.
