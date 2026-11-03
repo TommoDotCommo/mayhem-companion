@@ -419,6 +419,9 @@ pub struct Scanner {
     respawn: f64,
     /// Minimap frame when each relic's "+" first went missing (for the debug pictures).
     relic_gone_frame: [Option<Vec<u8>>; 4],
+    /// When a champion icon first reached the relic, and its closest approach (time, px).
+    relic_touch: [Option<f64>; 4],
+    relic_closest: [Option<(f64, f32)>; 4],
     debug_shots: u32,
     layout: Layout,
     matcher: Option<(usize, Matcher)>,
@@ -451,6 +454,8 @@ impl Scanner {
             beam_samples: load_beam_delay().map(|b| b.1).unwrap_or(0),
             respawn: cfg.relic_respawn,
             relic_gone_frame: Default::default(),
+            relic_touch: [None; 4],
+            relic_closest: [None; 4],
             debug_shots: 0,
             layout,
             matcher: None,
@@ -678,11 +683,17 @@ impl Scanner {
             return;
         }
         let r = (ms * 0.025).round().max(4.0) as i32;
-        let x0 = (mx + 0.35 * ms) as i32 - r;
-        let y0 = (my + 0.36 * ms) as i32 - r;
-        let (w, h) = ((0.37 * ms) as i32 + 2 * r, (0.35 * ms) as i32 + 2 * r);
+        // champion icons: a portrait in a team-coloured ring (18 px radius at a 429 px map)
+        let ring_r = ms * 0.042;
+        // a champion standing on the relic: its icon centre within ~150 units of it
+        let pickup_px = ms * 0.012;
+        let margin = r + (2.0 * ring_r) as i32 + 3;
+        let x0 = (mx + 0.35 * ms) as i32 - margin;
+        let y0 = (my + 0.36 * ms) as i32 - margin;
+        let (w, h) = ((0.37 * ms) as i32 + 2 * margin, (0.35 * ms) as i32 + 2 * margin);
         let buf = self.reader.grab_raw(x0, y0, w, h).to_vec();
         let mut state = [Icon::Gone; 4];
+        let mut icon_d: [Option<f32>; 4] = [None; 4];
         for (i, (u, v)) in crate::state::RELIC_UV.iter().enumerate() {
             let (cx, cy) = ((mx + u * ms) as i32 - x0, (my + v * ms) as i32 - y0);
             let (mut green, mut busy) = (0, 0);
@@ -693,14 +704,15 @@ impl Scanner {
                     if g > 140 && g > rr + 40 && g > b + 40 {
                         green += 1;
                     } else if rr.max(g).max(b) - rr.min(g).min(b) > 60 && rr.max(g).max(b) > 80 {
-                        busy += 1; // colourful: a champion icon, minions, a ping...
+                        busy += 1; // colourful: minions, a ping...
                     }
                 }
             }
+            icon_d[i] = nearest_icon(&buf, w, h, cx as f32, cy as f32, r as f32 + ring_r, ring_r);
             let area = (2 * r + 1) * (2 * r + 1);
             state[i] = if green >= 4 {
                 Icon::Up
-            } else if busy * 6 > area {
+            } else if icon_d[i].is_some() || busy * 6 > area {
                 Icon::Covered
             } else {
                 Icon::Gone
@@ -715,12 +727,26 @@ impl Scanner {
             return;
         }
         for i in 0..4 {
+            // the moment a champion icon reaches the relic = the pickup (closest approach
+            // if none quite reaches the centre)
+            if state[i] != Icon::Up {
+                if let Some(d) = icon_d[i] {
+                    if self.relic_touch[i].is_none() && d <= pickup_px {
+                        self.relic_touch[i] = Some(now);
+                    }
+                    if self.relic_closest[i].map(|(_, bd)| d < bd).unwrap_or(true) {
+                        self.relic_closest[i] = Some((now, d));
+                    }
+                }
+            }
             match state[i] {
                 Icon::Up => {
                     self.relic_was_up[i] = true;
                     self.relic_gone[i] = 0;
                     self.relic_left[i] = None;
                     self.relic_gone_at[i] = None;
+                    self.relic_touch[i] = None;
+                    self.relic_closest[i] = None;
                     self.relic_seen[i] = self.relic_seen[i].saturating_add(1);
                     if !up[i] && self.relic_seen[i] >= 5 && c.ready_at[i] - now > 3.0 {
                         log::info!("relic {i}: up on the minimap ({:.0}s early)", c.ready_at[i] - now);
@@ -746,6 +772,8 @@ impl Scanner {
                         self.relic_gone[i] = 0;
                         self.relic_left[i] = None;
                         self.relic_gone_at[i] = None;
+                        self.relic_touch[i] = None;
+                        self.relic_closest[i] = None;
                         continue;
                     }
                     if self.relic_gone_at[i].is_none() {
@@ -754,24 +782,27 @@ impl Scanner {
                     let gone_at = *self.relic_gone_at[i].get_or_insert(now);
                     let hidden_at = *self.relic_left[i].get_or_insert(gone_at);
                     self.relic_gone[i] += 1;
-                    // gone for a full second (back-dated below, so no accuracy lost)
+                    // gone (and uncovered) for a full second; the time is back-dated below
                     if now - gone_at >= 1.0 && self.relic_gone[i] >= 5 {
-                        // A champion icon covers the relic ~1 s before the champion reaches it
-                        // and until it walks off: the pickup is about a second into the cover,
-                        // or halfway through a short one.
-                        let since = if hidden_at < gone_at { (hidden_at + 1.0).min((hidden_at + gone_at) / 2.0) } else { gone_at };
+                        let (since, how) = match (self.relic_touch[i], self.relic_closest[i]) {
+                            (Some(t), _) => (t, "icon reached it"),
+                            (None, Some((t, d))) if d <= pickup_px * 2.5 => (t, "icon closest"),
+                            _ if hidden_at < gone_at => ((hidden_at + 1.0).min((hidden_at + gone_at) / 2.0), "covered, estimated"),
+                            _ => (gone_at, "disappeared"),
+                        };
                         c.ready_at[i] = since + self.beam_delay + self.respawn;
                         self.relic_pickup_at[i] = Some(since);
                         let first = self.relic_gone_frame[i].take();
                         self.debug_shot(i, "taken-first-gone", first.as_deref().unwrap_or(&buf), w, h);
                         self.debug_shot(i, "taken-confirmed", &buf, w, h);
                         log::info!(
-                            "relic {i}: taken (minimap) at {since:.1}s (covered {:.1}s, gone at {gone_at:.1}s)",
-                            gone_at - hidden_at
+                            "relic {i}: taken (minimap) at {since:.1}s ({how}; covered from {hidden_at:.1}s, gone at {gone_at:.1}s)"
                         );
                         self.relic_gone[i] = 0;
                         self.relic_left[i] = None;
                         self.relic_gone_at[i] = None;
+                        self.relic_touch[i] = None;
+                        self.relic_closest[i] = None;
                         self.relic_was_up[i] = false;
                     }
                 }
@@ -929,6 +960,48 @@ fn load_beam_delay() -> Option<(f64, u32)> {
 
 fn save_beam_delay(delay: f64, samples: u32) {
     let _ = std::fs::write(beam_file(), serde_json::json!({ "beam_delay": delay, "samples": samples }).to_string());
+}
+
+/// Distance from (cx, cy) to the nearest champion icon centre within `search` px: a ring of
+/// team colour (ally blue / enemy red) of radius `ring_r`. Minions are small solid dots and
+/// don't make a ring. BGRA buffer `w` x `h`.
+pub fn nearest_icon(buf: &[u8], w: i32, h: i32, cx: f32, cy: f32, search: f32, ring_r: f32) -> Option<f32> {
+    const ANGLES: usize = 32;
+    let team = |x: i32, y: i32| {
+        if x < 0 || y < 0 || x >= w || y >= h {
+            return false;
+        }
+        let k = ((y * w + x) * 4) as usize;
+        let (b, g, r) = (buf[k] as i32, buf[k + 1] as i32, buf[k + 2] as i32);
+        (b > 170 && b > r + 80 && g > 100) || (r > 160 && r > g + 90 && r > b + 90)
+    };
+    let dirs: Vec<(f32, f32)> =
+        (0..ANGLES).map(|a| (a as f32 * std::f32::consts::TAU / ANGLES as f32)).map(|t| (t.cos(), t.sin())).collect();
+    let mut best: Option<f32> = None;
+    let s = search.ceil() as i32;
+    for dy in (-s..=s).step_by(2) {
+        for dx in (-s..=s).step_by(2) {
+            let d = ((dx * dx + dy * dy) as f32).sqrt();
+            if d > search || best.is_some_and(|b| d >= b) {
+                continue;
+            }
+            let (px, py) = (cx + dx as f32, cy + dy as f32);
+            let hits = dirs
+                .iter()
+                .filter(|(c, sn)| {
+                    [-1.5f32, 0.0, 1.0].iter().any(|o| {
+                        let rr = ring_r + o;
+                        team((px + c * rr).round() as i32, (py + sn * rr).round() as i32)
+                    })
+                })
+                .count();
+            // most of the ring visible (other icons can overlap part of it)
+            if hits * 100 >= ANGLES * 55 {
+                best = Some(d);
+            }
+        }
+    }
+    best
 }
 
 #[derive(Clone, Copy, PartialEq)]
