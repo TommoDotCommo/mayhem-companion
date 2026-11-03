@@ -108,7 +108,7 @@ From WSL or Linux, with `rustup target add x86_64-pc-windows-gnu` and mingw-w64 
 
     cargo build --release --target x86_64-pc-windows-gnu
 
-Tests: `cargo test`. Debug tools: `--demo <Champion> [round]` (fake champ select), `--scan <Champion>` (one screen sweep, logged), `--render <in.png> <out.png> <Champion>` (draws the overlay onto a screenshot), and `--balance` (logs balance data). Set the `ARAM_DEBUG` environment variable for debug logging, plus pictures of what the relic watch saw.
+Tests: `cargo test`. Releases: push a version tag (`git tag v0.3.1 && git push origin v0.3.1`) and GitHub builds and publishes the exe. Debug tools: `--demo <Champion> [round]` (fake champ select), `--scan <Champion>` (one screen sweep, logged), `--render <in.png> <out.png> <Champion>` (draws the overlay onto a screenshot), and `--balance` (logs balance data). Set the `ARAM_DEBUG` environment variable for debug logging, plus pictures of what the relic watch saw.
 
 ## Licence
 
