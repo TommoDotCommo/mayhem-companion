@@ -880,7 +880,7 @@ fn minimap_flipped(league_dir: &str) -> bool {
 /// Look for the minimap now and then while relic timers run (it can't be found while
 /// dead: the screen goes grey). Keeps the last good position.
 fn track_minimap(cfg: &Config, scanner: &mut Scanner, relics: &RelicRef, last: &mut Instant) {
-    if !cfg.relic_timers || !cfg.relic_on_minimap || cfg.relic_minimap.is_some() {
+    if !cfg.relic_timers || cfg.relic_minimap.is_some() {
         return;
     }
     let known = relics.lock().unwrap().minimap;

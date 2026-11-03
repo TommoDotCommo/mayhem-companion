@@ -768,101 +768,22 @@ impl Overlay {
         }
     }
 
-    // ---- heal relic timers: on the minimap over each relic, or a bar at the top
+    // ---- heal relic timers, on the minimap over each relic
 
     unsafe fn render_relics(&mut self) {
         let c = *self.relics.lock().unwrap();
-        if !c.active {
-            if let Some(l) = self.relic_layer.as_mut() {
-                if l.visible {
-                    Self::show(l, false);
+        let minimap = self.cfg.relic_minimap.map(|m| (m[0], m[1], m[2])).or(c.minimap);
+        match minimap.filter(|_| c.active) {
+            Some(m) => self.render_relics_minimap(&c, m),
+            None => {
+                // not in a game, or the minimap hasn't been found yet: nothing to show
+                if let Some(l) = self.relic_layer.as_mut() {
+                    if l.visible {
+                        Self::show(l, false);
+                    }
                 }
+                self.relic_key.clear();
             }
-            self.relic_key.clear();
-            return;
-        }
-        if self.cfg.relic_on_minimap {
-            if let Some(m) = self.cfg.relic_minimap.map(|m| (m[0], m[1], m[2])).or(c.minimap) {
-                return self.render_relics_minimap(&c, m);
-            }
-        }
-        let now = c.now();
-        let cells: Vec<(String, f64)> = (0..4)
-            .map(|i| {
-                let rem = c.ready_at[i] - now;
-                if rem <= 0.0 {
-                    ("UP".to_string(), rem)
-                } else {
-                    let s = rem.ceil() as i64;
-                    (format!("{}:{:02}", s / 60, s % 60), rem)
-                }
-            })
-            .collect();
-        let key = format!("{:?}{:?}", cells.iter().map(|c| &c.0).collect::<Vec<_>>(), c.my_side_blue);
-        if key == self.relic_key && self.relic_layer.as_ref().is_some_and(|l| l.visible) {
-            return; // nothing visible changed: no redraw
-        }
-        self.relic_key = key;
-        if self.relic_layer.is_none() {
-            self.relic_layer = Some(self.new_layer());
-        }
-        let p = &mut self.painter;
-        let s = 15.0 * self.dpi_scale * self.cfg.panel_scale;
-        let (cell_w, cell_h, gap, mid) = (s * 4.0, s * 2.1, s * 0.3, s * 0.9);
-        let marker_h = if c.my_side_blue.is_some() { s * 1.1 } else { 0.0 };
-        let w = (4.0 * cell_w + 2.0 * gap + mid + 4.0).ceil();
-        let h = (cell_h + marker_h + 4.0).ceil();
-        let texts: Vec<Text> = cells
-            .iter()
-            .map(|(t, _)| p.text(t, s * 1.05, if t == "UP" { DWRITE_FONT_WEIGHT_BOLD } else { DWRITE_FONT_WEIGHT_SEMI_BOLD }))
-            .collect();
-        let plus = p.text("+", s * 1.1, DWRITE_FONT_WEIGHT_BLACK);
-        let you = p.text("YOUR SIDE", s * 0.62, DWRITE_FONT_WEIGHT_BOLD);
-        let sw = GetSystemMetrics(SM_CXSCREEN);
-        let x = sw / 2 - (w as i32) / 2 + (self.cfg.relic_x as f32 * self.dpi_scale) as i32;
-        let y = (self.cfg.relic_y as f32 * self.dpi_scale) as i32;
-        let layer = self.relic_layer.as_mut().unwrap();
-        Self::present(p, layer, x, y, w as i32, h as i32, |p| {
-            let mut cx = 2.0;
-            for i in 0..4 {
-                if i == 2 {
-                    cx += mid - gap;
-                }
-                let blue = i < 2;
-                let side = if blue { [0x3a, 0xa0, 0xff] } else { [0xff, 0x5a, 0x5a] };
-                let (label, rem) = (&cells[i].0, cells[i].1);
-                let up = label == "UP";
-                p.fill(cx, 2.0, cell_w, cell_h, 5.0, BG, 0.88);
-                p.fill(cx + 4.0, 2.0, cell_w - 8.0, 3.0, 1.5, side, 1.0);
-                if up {
-                    p.stroke(cx + 0.5, 2.5, cell_w - 1.0, cell_h - 1.0, 5.0, [0x4a, 0xde, 0x80], 1.5);
-                }
-                let green = [0x4a, 0xde, 0x80];
-                let plus_rgb = if up { green } else { [0x3a, 0x55, 0x48] };
-                let t = &texts[i];
-                let content = plus.w + s * 0.25 + t.w;
-                let x0 = cx + (cell_w - content) / 2.0;
-                p.draw(&plus, x0, 2.0 + (cell_h - plus.h) / 2.0 + s * 0.05, plus_rgb);
-                let rgb = if up {
-                    green
-                } else if rem <= 10.0 {
-                    [0xf5, 0xc5, 0x18]
-                } else {
-                    FG
-                };
-                p.draw(t, x0 + plus.w + s * 0.25, 2.0 + (cell_h - t.h) / 2.0 + s * 0.1, rgb);
-                cx += cell_w + gap;
-            }
-            if let Some(mine_blue) = c.my_side_blue {
-                let pair_w = 2.0 * cell_w + gap;
-                let px = if mine_blue { 2.0 } else { 2.0 + pair_w + mid };
-                let ty = 2.0 + cell_h + 2.0;
-                p.draw(&you, px + (pair_w - you.w) / 2.0, ty, if mine_blue { [0x3a, 0xa0, 0xff] } else { [0xff, 0x5a, 0x5a] });
-            }
-        });
-        let layer = self.relic_layer.as_mut().unwrap();
-        if !layer.visible {
-            Self::show(layer, true);
         }
     }
 

@@ -71,6 +71,27 @@ pub fn load_picks(game_start: f64) -> Option<u32> {
     ((v["start"].as_f64()? - game_start).abs() < 30.0).then(|| v["picks"].as_u64().map(|p| p as u32)).flatten()
 }
 
+fn relics_file() -> std::path::PathBuf {
+    crate::config::data_dir().join("relics.json")
+}
+
+pub fn save_relics(game_start: f64, ready_at: [f64; 4]) {
+    if game_start > 0.0 {
+        let v = serde_json::json!({ "start": game_start.round(), "ready_at": ready_at });
+        let _ = std::fs::write(relics_file(), v.to_string());
+    }
+}
+
+/// Saved relic timers, if they belong to the game that started at `game_start`.
+pub fn load_relics(game_start: f64) -> Option<[f64; 4]> {
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(relics_file()).ok()?).ok()?;
+    if (v["start"].as_f64()? - game_start).abs() >= 30.0 {
+        return None;
+    }
+    let a: Vec<f64> = v["ready_at"].as_array()?.iter().filter_map(|x| x.as_f64()).collect();
+    a.try_into().ok()
+}
+
 impl ScanCtl {
     pub fn round(&self) -> u32 {
         (self.picks + 1).min(self.max_round.max(1)).clamp(1, 4)

@@ -40,6 +40,8 @@ pub struct Engine {
     game_seen: bool,
     /// Pick count restored (or started fresh) for the current game.
     picks_loaded: bool,
+    /// Relic timers as last saved to disk (kept across a restart mid-game).
+    relics_saved: [f64; 4],
     hide_panel_at: Option<Instant>,
     next_live: Instant,
 }
@@ -68,6 +70,7 @@ impl Engine {
             level: 0,
             game_seen: false,
             picks_loaded: false,
+            relics_saved: [0.0; 4],
             hide_panel_at: None,
             next_live: Instant::now(),
         }
@@ -449,7 +452,18 @@ impl Engine {
             // new game (or the clock jumped back): first spawns at 1:45 outer / 2:30 inner
             if !r.active || game_time + 5.0 < r.game_time {
                 r.start(self.cfg.relic_first_outer, self.cfg.relic_first_inner);
-                log::info!("relic timers started at {game_time:.0}s");
+                let start = self.scan.lock().unwrap().game_start;
+                match crate::state::load_relics(start) {
+                    Some(saved) => {
+                        r.ready_at = saved;
+                        log::info!("relic timers resumed at {game_time:.0}s");
+                    }
+                    None => log::info!("relic timers started at {game_time:.0}s"),
+                }
+            }
+            if r.ready_at != self.relics_saved {
+                self.relics_saved = r.ready_at;
+                crate::state::save_relics(self.scan.lock().unwrap().game_start, r.ready_at);
             }
             r.game_time = game_time;
             r.at = Some(Instant::now());

@@ -7,7 +7,7 @@ A native Windows app for ARAM: Mayhem, written in Rust. It's a single 7 MB `.exe
   - **Rank** among every augment of that rarity for your champion and round, e.g. **3rd / 58**. The top 10% are green and the bottom 10% red; the single best augment gets a green frame and the single worst a red one.
   - **Build fit** with the augment's category: **✓ FITS BUILD · AP**, **✗ OFF-BUILD · Crit** or **• ANY BUILD · Economy**.
   - Rerolls update the badges straight away. **F8** toggles a panel with your champion's best augments and builds.
-- **Heal relic timers:** on the minimap, a countdown sits on each relic that's down; relics that are up keep the game's own "+" icon. The minimap is found automatically from its frame (either corner, any size), or set `relic_minimap` to `[x, y, size]`. Until it's found, or with `relic_on_minimap` off, a bar at the top of the screen shows all four.
+- **Heal relic timers:** on the minimap, a countdown sits on each relic that's down; relics that are up keep the game's own "+" icon. The minimap is found automatically from its frame (either corner, any size), or set `relic_minimap` to `[x, y, size]`.
   - **First spawns:** automatic from the game clock (1:45 outer, 2:30 inner).
   - **Pickups are automatic:** the app watches each relic's "+" on the minimap. When it disappears the 90 s respawn starts; when it reappears early the timer is corrected. A champion icon covering a relic doesn't count as a pickup.
   - **Respawns:** holding **Tab** syncs all four from the game's own scoreboard timers; they keep counting after you let go.
