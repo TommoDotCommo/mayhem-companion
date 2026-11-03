@@ -14,6 +14,7 @@ A native Windows app for ARAM: Mayhem, written in Rust. It's a single 7 MB `.exe
   - **Manual backup:** **Alt+1–4** marks a relic taken (press again within 3 s to undo).
   - Timers turn yellow for their last 10 seconds.
 - **Champ select:** the companion window opens with your pick, bench and team, each with a tier and win rate. The bench shows the win-rate gap against your pick, and you swap with one click; you can also reroll from there. Your builds are imported as `[Mayhem]` item sets, one page per build style (e.g. *AP burst*, *AP bruiser*), with core, full build, next items, variants and boots, and your summoner spells are set, keeping Flash on the key you already use.
+- **Remembers its place:** the companion reopens on the same monitor, position and size (or maximized) as last time.
 - **Browse:** a champion tier list, with each champion's augments (by rarity and pick round) and core builds that import with one click. There's also an augment tier list showing which champions each augment is best and worst on.
 
 Data comes from [arammeta.com](https://arammeta.com) ([MIT source](https://github.com/Lanternko/ARAM-Mayhem-Database)), built from about 800k Mayhem games per patch. Not endorsed by Riot Games.

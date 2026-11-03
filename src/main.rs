@@ -146,7 +146,8 @@ fn run_companion(cfg: Config, data: Arc<data::Data>, args: &[String]) {
     let mut viewport = egui::ViewportBuilder::default()
         .with_title(overlay::COMPANION_TITLE)
         .with_inner_size([1280.0, 820.0])
-        .with_min_inner_size([980.0, 620.0]);
+        .with_min_inner_size([980.0, 620.0])
+        .with_visible(false); // shown on the first frame, at the remembered position
     if let Some(icon) = icon {
         viewport = viewport.with_icon(icon);
     }

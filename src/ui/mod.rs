@@ -1,6 +1,7 @@
 //! Companion window (egui, GPU-rendered, repaints only on input or new data).
 
 mod images;
+mod placement;
 mod widgets;
 
 use crate::config::Config;
@@ -70,6 +71,8 @@ pub struct App {
     ratings: HashMap<u32, Arc<HashMap<u32, AugRating>>>,
     best_for_aug: HashMap<u32, Vec<(u32, Rating)>>,
     pending_open: Option<(String, String)>,
+    /// The window starts hidden; first frame puts it where it was last time, then shows it.
+    placed: bool,
 }
 
 impl App {
@@ -95,6 +98,7 @@ impl App {
             ratings: HashMap::new(),
             best_for_aug: HashMap::new(),
             pending_open: None,
+            placed: false,
         }
     }
 
@@ -843,6 +847,14 @@ fn elide(ui: &Ui, text: &str, font: egui::FontId, max_w: f32) -> String {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if !self.placed {
+            self.placed = true;
+            if let Some(hwnd) = placement::own_window(crate::overlay::COMPANION_TITLE) {
+                placement::restore(hwnd);
+                placement::keep_saved(hwnd);
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        }
         let Some(meta) = self.data.meta_cached() else {
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.centered_and_justified(|ui| {
