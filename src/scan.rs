@@ -424,6 +424,10 @@ pub struct Scanner {
     /// When a champion icon first reached the relic, and its closest approach (time, px).
     relic_touch: [Option<f64>; 4],
     relic_closest: [Option<(f64, f32)>; 4],
+    /// Last time the "+" was visible, and the last time an icon reached a relic that was up
+    /// just before (a likely pickup, recorded at once so a Tab right after can measure it).
+    relic_up_at: [f64; 4],
+    relic_reach: [Option<f64>; 4],
     debug_shots: u32,
     layout: Layout,
     matcher: Option<(usize, Matcher)>,
@@ -460,6 +464,8 @@ impl Scanner {
             relic_gone_frame: Default::default(),
             relic_touch: [None; 4],
             relic_closest: [None; 4],
+            relic_up_at: [f64::NEG_INFINITY; 4],
+            relic_reach: [None; 4],
             debug_shots: 0,
             layout,
             matcher: None,
@@ -645,8 +651,15 @@ impl Scanner {
                     if (exact - c.ready_at[k]).abs() > 1.0 {
                         log::info!("relic {k}: scoreboard {secs}s, timer was {:+.1}s off", c.ready_at[k] - exact);
                     }
-                    // learn pickup -> timer start from a pickup the minimap saw
-                    if let Some(p) = self.relic_pickup_at[k].take() {
+                    // learn pickup -> timer start from a pickup the minimap saw: a confirmed one,
+                    // or an icon reaching the relic just before this new timer
+                    let new_timer = (exact - c.ready_at[k]).abs() > 1.0;
+                    let reach = self.relic_reach[k].filter(|t| {
+                        let d = exact - self.respawn - t;
+                        new_timer && (-1.0..8.0).contains(&d)
+                    });
+                    if let Some(p) = self.relic_pickup_at[k].take().or(reach) {
+                        self.relic_reach[k] = None;
                         let delay = exact - self.respawn - p;
                         if (-1.0..8.0).contains(&delay) {
                             self.beam_samples += 1;
@@ -738,6 +751,15 @@ impl Scanner {
             return;
         }
         for i in 0..4 {
+            if state[i] == Icon::Up {
+                self.relic_up_at[i] = now;
+            } else if icon_d[i].is_some_and(|d| d <= pickup_px)
+                && now - self.relic_up_at[i] < 3.0
+                && self.relic_reach[i].map(|t| now - t > 5.0).unwrap_or(true)
+            {
+                self.relic_reach[i] = Some(now);
+                log::info!("relic {i}: icon reached it at {now:.1}s");
+            }
             // the moment a champion icon reaches the relic = the pickup (closest approach
             // if none quite reaches the centre)
             if state[i] != Icon::Up {
