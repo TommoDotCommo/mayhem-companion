@@ -2,17 +2,18 @@
 
 A native Windows app for ARAM: Mayhem, written in Rust. It's a single 7 MB `.exe` that needs no runtime.
 
-- **In game:** when augment cards come up, each one gets a badge:
+- **In game:** when augment cards come up, each one gets a badge just above the card, all the same size:
   - **Tier and win rate** (**S+ S A B C D F**) for your champion, at the pick round you're on (R1–R4).
   - **Rank** among every augment of that rarity for your champion and round, e.g. **3rd / 58**. The top 10% are green and the bottom 10% red; the single best augment gets a green frame and the single worst a red one.
   - **Build fit** with the augment's category: **✓ FITS BUILD · AP**, **✗ OFF-BUILD · Crit** or **• ANY BUILD · Economy**.
   - Rerolls update the badges straight away. **F8** toggles a panel with your champion's best augments and builds.
 - **Heal relic timers:** on the minimap, a countdown sits on each relic that's down; relics that are up keep the game's own "+" icon. The minimap is found automatically from its frame (either corner, any size), or set `relic_minimap` to `[x, y, size]`. Until it's found, or with `relic_on_minimap` off, a bar at the top of the screen shows all four.
   - **First spawns:** automatic from the game clock (1:45 outer, 2:30 inner).
+  - **Pickups are automatic:** the app watches each relic's "+" on the minimap. When it disappears the 90 s respawn starts; when it reappears early the timer is corrected. A champion icon covering a relic doesn't count as a pickup.
   - **Respawns:** holding **Tab** syncs all four from the game's own scoreboard timers; they keep counting after you let go.
   - **Manual backup:** **Alt+1–4** marks a relic taken (press again within 3 s to undo).
   - Timers turn yellow for their last 10 seconds.
-- **Champ select:** the companion window opens with your pick, bench and team, each with a tier and win rate. The bench shows the win-rate gap against your pick, and you swap with one click; you can also reroll from there. Your build is imported as a `[Mayhem]` item set and your summoner spells are set, keeping Flash on the key you already use.
+- **Champ select:** the companion window opens with your pick, bench and team, each with a tier and win rate. The bench shows the win-rate gap against your pick, and you swap with one click; you can also reroll from there. Your builds are imported as `[Mayhem]` item sets, one page per build style (e.g. *AP burst*, *AP bruiser*), with core, full build, next items, variants and boots, and your summoner spells are set, keeping Flash on the key you already use.
 - **Browse:** a champion tier list, with each champion's augments (by rarity and pick round) and core builds that import with one click. There's also an augment tier list showing which champions each augment is best and worst on.
 
 Data comes from [arammeta.com](https://arammeta.com) ([MIT source](https://github.com/Lanternko/ARAM-Mayhem-Database)), built from about 800k Mayhem games per patch. Not endorsed by Riot Games.

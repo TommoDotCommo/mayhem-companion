@@ -210,6 +210,10 @@ pub struct Cluster {
     pub pick: f64,
     pub options: Vec<ItemRef>,
     pub tail: Vec<ItemRef>,
+    /// The most common full build in this cluster (boots included).
+    pub completion: Vec<ItemRef>,
+    #[serde(rename = "routeBoot")]
+    pub route_boot: Option<ItemRef>,
 }
 
 /// augment-stats.json: champion id -> rarity -> augment stats (for "best champions" lookups).

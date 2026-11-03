@@ -91,7 +91,8 @@ struct Dxgi {
     origin: (i32, i32),
     /// GPU copy of the newest desktop frame (so any strip can be read at any time).
     frame: Option<ID3D11Texture2D>,
-    staging: Option<(ID3D11Texture2D, i32, i32)>,
+    /// CPU-readable copies, one per strip size in use (card strip, minimap, scoreboard...).
+    staging: Vec<(ID3D11Texture2D, i32, i32)>,
 }
 
 impl Dxgi {
@@ -128,7 +129,7 @@ impl Dxgi {
                     let ctx = ctx.ok_or("no context")?;
                     let output: IDXGIOutput1 = output.cast().map_err(|e| e.to_string())?;
                     let dup = output.DuplicateOutput(&device).map_err(|e| format!("DuplicateOutput: {e}"))?;
-                    return Ok(Dxgi { device, ctx, output, dup, origin: (r.left, r.top), frame: None, staging: None });
+                    return Ok(Dxgi { device, ctx, output, dup, origin: (r.left, r.top), frame: None, staging: Vec::new() });
                 }
             }
             Err("primary output not found".into())
@@ -185,7 +186,10 @@ impl Dxgi {
             if !changed && same_rect {
                 return Ok(false);
             }
-            if self.staging.as_ref().map(|(_, sw, sh)| (*sw, *sh) != (w, h)).unwrap_or(true) {
+            let found = self.staging.iter().position(|(_, sw, sh)| (*sw, *sh) == (w, h));
+            let idx = if let Some(i) = found {
+                i
+            } else {
                 let desc = D3D11_TEXTURE2D_DESC {
                     Width: w as u32,
                     Height: h as u32,
@@ -200,9 +204,13 @@ impl Dxgi {
                 };
                 let mut tex = None;
                 self.device.CreateTexture2D(&desc, None, Some(&mut tex)).map_err(|e| e.to_string())?;
-                self.staging = Some((tex.ok_or("staging")?, w, h));
-            }
-            let (staging, ..) = self.staging.as_ref().unwrap();
+                if self.staging.len() >= 6 {
+                    self.staging.remove(0);
+                }
+                self.staging.push((tex.ok_or("staging")?, w, h));
+                self.staging.len() - 1
+            };
+            let (staging, ..) = &self.staging[idx];
             let (ox, oy) = (x - self.origin.0, y - self.origin.1);
             let src = D3D11_BOX { left: ox as u32, top: oy as u32, front: 0, right: (ox + w) as u32, bottom: (oy + h) as u32, back: 1 };
             self.ctx.CopySubresourceRegion(staging, 0, 0, 0, 0, &frame, 0, Some(&src));

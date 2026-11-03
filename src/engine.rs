@@ -270,19 +270,26 @@ impl Engine {
 
     fn import(&self, meta: &Meta, detail: &ChampDetail, cid: u32, prefer_cluster: Option<usize>) {
         let Some(lcu) = &self.lcu else { return };
-        let mut notes = vec![];
+        let mut notes: Vec<String> = vec![];
         if self.cfg.import_item_set {
-            let ok = import_item_set(lcu, &make_item_set(meta, detail, cid, prefer_cluster));
-            notes.push(if ok { "item set ✓" } else { "item set ✗" });
+            let sets = make_item_sets(meta, detail, cid, prefer_cluster);
+            let ok = !sets.is_empty() && import_item_sets(lcu, &sets);
+            notes.push(if !ok {
+                "item sets ✗".to_string()
+            } else if sets.len() == 1 {
+                "item set ✓".to_string()
+            } else {
+                format!("{} build pages ✓", sets.len())
+            });
         }
         if self.cfg.set_summoner_spells && prefer_cluster.is_none() {
             let want: Vec<u32> = detail.spells.top.first().map(|s| s.items.iter().map(|i| i.id).collect()).unwrap_or_default();
             if want.len() == 2 {
                 match pick_spell_slots(self.spells, &want) {
-                    None => notes.push("spells ✓"),
+                    None => notes.push("spells ✓".into()),
                     Some((a, b)) => {
                         let ok = lcu.send("PATCH", "/lol-champ-select/v1/session/my-selection", Some(&json!({"spell1Id": a, "spell2Id": b})));
-                        notes.push(if ok { "spells ✓" } else { "spells ✗" });
+                        notes.push(if ok { "spells ✓" } else { "spells ✗" }.into());
                     }
                 }
             }
@@ -565,42 +572,65 @@ impl Engine {
 
 // ------------------------------------------------------------------ item sets
 
-pub fn make_item_set(meta: &Meta, detail: &ChampDetail, cid: u32, prefer: Option<usize>) -> Value {
+/// One item-set page per build style (the clusters' names: "AP burst", "Tank / Heartsteel"…),
+/// so the shop's item-set dropdown switches between genuinely different builds. Clusters
+/// sharing a style become variants on the same page. `prefer` (a cluster index) goes first.
+pub fn make_item_sets(meta: &Meta, detail: &ChampDetail, cid: u32, prefer: Option<usize>) -> Vec<Value> {
     let block = |title: String, ids: Vec<u32>| {
         let mut seen = std::collections::HashSet::new();
         let items: Vec<Value> = ids.into_iter().filter(|i| seen.insert(*i)).map(|i| json!({"id": i.to_string(), "count": 1})).collect();
         json!({"type": title, "items": items})
     };
-    let mut groups: Vec<&Cluster> = detail.clusters.groups.iter().take(3).collect();
-    if let Some(p) = prefer.filter(|p| *p < groups.len()) {
-        let g = groups.remove(p);
-        groups.insert(0, g);
+    let mut order: Vec<usize> = (0..detail.clusters.groups.len()).collect();
+    if let Some(p) = prefer.filter(|p| *p < order.len()) {
+        order.retain(|i| *i != p);
+        order.insert(0, p);
     }
-    let mut blocks = vec![];
+    // group by style name, keeping the order styles first appear in
+    let mut styles: Vec<(String, Vec<&Cluster>)> = vec![];
+    for i in order {
+        let g = &detail.clusters.groups[i];
+        let name = if g.name_en.is_empty() { "Build".to_string() } else { g.name_en.clone() };
+        match styles.iter_mut().find(|(n, _)| *n == name) {
+            Some((_, v)) => v.push(g),
+            None => styles.push((name, vec![g])),
+        }
+    }
     let boots: Vec<u32> = detail.boots.top.iter().filter_map(|b| b.items.first().map(|i| i.id)).collect();
-    if !boots.is_empty() {
-        blocks.push(block("Boots".into(), boots));
-    }
-    for g in groups {
-        let label = if g.name_en.is_empty() { "Build".to_string() } else { g.name_en.clone() };
-        blocks.push(block(format!("{label} - core ({:.1}% WR)", g.wr * 100.0), g.core.iter().map(|i| i.id).collect()));
-        blocks.push(block(format!("{label} - next"), g.options.iter().chain(g.tail.iter()).map(|i| i.id).collect()));
-    }
     let singles: Vec<u32> = detail.single_items.top.iter().filter_map(|s| s.items.first().map(|i| i.id)).take(10).collect();
-    if !singles.is_empty() {
-        blocks.push(block("Highest win-rate items".into(), singles));
-    }
-    blocks.retain(|b| b["items"].as_array().map(|a| !a.is_empty()).unwrap_or(false));
-    json!({
-        "title": format!("{TAG} {} {}", meta.champ_name(cid), meta.patch_prefix),
-        "associatedChampions": [cid], "associatedMaps": [],
-        "blocks": blocks, "map": "any", "mode": "any", "type": "custom", "sortrank": 0,
-        "startedFrom": "blank", "preferredItemSlots": [],
-        "uid": format!("aram-mayhem-{cid}-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)),
-    })
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    let pages = styles.into_iter().take(4).enumerate().map(|(rank, (style, clusters))| {
+        let main = clusters[0];
+        let mut blocks = vec![];
+        blocks.push(block(
+            format!("Core · {:.1}% WR · {:.1}k games", main.wr * 100.0, main.g / 1000.0),
+            main.core.iter().map(|i| i.id).collect(),
+        ));
+        blocks.push(block("Full build".into(), main.completion.iter().map(|i| i.id).collect()));
+        blocks.push(block("Next items".into(), main.options.iter().chain(main.tail.iter()).map(|i| i.id).collect()));
+        for (n, v) in clusters.iter().skip(1).enumerate() {
+            blocks.push(block(
+                format!("Variant {} core · {:.1}% WR", n + 2, v.wr * 100.0),
+                v.core.iter().chain(v.options.iter()).map(|i| i.id).collect(),
+            ));
+        }
+        let mut b: Vec<u32> = main.route_boot.iter().map(|i| i.id).collect();
+        b.extend(boots.iter());
+        blocks.push(block("Boots".into(), b));
+        blocks.push(block("Highest win-rate items".into(), singles.clone()));
+        blocks.retain(|b| b["items"].as_array().map(|a| !a.is_empty()).unwrap_or(false));
+        json!({
+            "title": format!("{TAG} {} · {style}", meta.champ_name(cid)),
+            "associatedChampions": [cid], "associatedMaps": [],
+            "blocks": blocks, "map": "any", "mode": "any", "type": "custom", "sortrank": rank,
+            "startedFrom": "blank", "preferredItemSlots": [],
+            "uid": format!("aram-mayhem-{cid}-{rank}-{stamp}"),
+        })
+    });
+    pages.collect()
 }
 
-fn import_item_set(lcu: &Lcu, set: &Value) -> bool {
+fn import_item_sets(lcu: &Lcu, new_sets: &[Value]) -> bool {
     let Some(me) = lcu.get("/lol-summoner/v1/current-summoner") else { return false };
     let sid = me["summonerId"].as_u64().unwrap_or(0);
     let path = format!("/lol-item-sets/v1/item-sets/{sid}/sets");
@@ -609,7 +639,7 @@ fn import_item_set(lcu: &Lcu, set: &Value) -> bool {
         .as_array()
         .map(|a| a.iter().filter(|s| !s["title"].as_str().unwrap_or("").starts_with(TAG)).cloned().collect())
         .unwrap_or_default();
-    sets.push(set.clone());
+    sets.extend(new_sets.iter().cloned());
     let body = json!({
         "accountId": me.get("accountId").cloned().unwrap_or(current["accountId"].clone()),
         "itemSets": sets,

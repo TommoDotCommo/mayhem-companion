@@ -59,6 +59,7 @@ fn main() {
     match mode {
         "--scan" => scan_once(&cfg, &data, args.get(1).map(String::as_str).unwrap_or("Annie")),
         "--companion" => run_companion(cfg, data, &args),
+        "--render" => render_debug(&cfg, &data, &args[1..]),
         "--find-minimap" => find_minimap_in(args.get(1).map(String::as_str).unwrap_or("")),
         _ => run_service(cfg, data, &args),
     }
@@ -256,5 +257,88 @@ fn find_minimap_in(path: &str) {
         let r = scan::find_minimap(&buf, side, sh, flipped);
         let r = r.map(|(x, y, s)| (x + if flipped { 0.0 } else { x0 as f32 }, y + (sh - side) as f32, s));
         log::info!("find-minimap {path} flipped={flipped}: {r:?} in {} us", t.elapsed().as_micros());
+    }
+}
+
+/// Debug: draw the real overlay onto a screenshot without showing any window.
+/// `--render <in.png> <out.png> <Champion> [round] [minimap_x minimap_y size]`
+/// Cards are found with the real OCR + matcher; relic timers use demo times.
+fn render_debug(cfg: &Config, data: &Arc<data::Data>, args: &[String]) {
+    let run = || -> Result<(), String> {
+        let (input, output) = (args.first().ok_or("no input")?, args.get(1).ok_or("no output")?);
+        let champ = args.get(2).map(String::as_str).unwrap_or("Annie");
+        let round: u32 = args.get(3).and_then(|r| r.parse().ok()).unwrap_or(1);
+        let mm: Vec<f32> = args.iter().skip(4).filter_map(|v| v.parse().ok()).collect();
+        let img = image::open(input).map_err(|e| e.to_string())?.to_rgba8();
+        let (w, h) = (img.width() as i32, img.height() as i32);
+        let bgra: Vec<u8> = img.pixels().flat_map(|p| [p.0[2], p.0[1], p.0[0], 255]).collect();
+
+        let meta = data.meta()?;
+        let cid = meta.find_champ(champ).ok_or("unknown champion")?;
+        let detail = data.champ(cid)?;
+        let mut ctl = state::ScanCtl::default();
+        ctl.ratings = Arc::new(model::champ_ratings(&meta, &detail, cid, cfg));
+        ctl.max_round = 4;
+        ctl.picks = round.saturating_sub(1);
+        let items = data.items()?;
+        let core: Vec<u32> = detail.clusters.groups.first().map(|g| g.core.iter().map(|i| i.id).collect()).unwrap_or_default();
+        ctl.build = model::build_profile(&items, &core);
+
+        let mut reader = scan::Reader::new(&cfg.ocr_language)?;
+        let matcher = scan::Matcher::new(&meta);
+        let mut hits: Vec<scan::Hit> = vec![];
+        let band = 90.min(h);
+        let mut y = 0;
+        while y + band <= h {
+            for hit in matcher.find(&reader.read_image(&bgra, w, y, band)?, &[]) {
+                if !hits.iter().any(|o| o.id == hit.id) {
+                    hits.push(hit);
+                }
+            }
+            y += 45;
+        }
+        let badges = scan::make_badges(&hits, &meta, &ctl);
+        for b in &badges {
+            log::info!("render: {} {} rank={:?} at ({}, {}) h={}", b.name, b.tier.label(), b.rank, b.x, b.y, b.h);
+        }
+
+        *overlay::CAPTURE.lock().unwrap() = Some(Default::default());
+        let relics: state::RelicRef = Arc::new(Mutex::new(state::RelicClock::default()));
+        if mm.len() == 3 {
+            let mut r = relics.lock().unwrap();
+            r.start(105.0, 150.0);
+            r.game_time = 600.0;
+            r.at = Some(std::time::Instant::now());
+            r.ready_at = [600.0 + 47.0, 590.0, 600.0 + 8.0, 600.0 + 83.0];
+            r.minimap = Some((mm[0], mm[1], mm[2]));
+        }
+        let ov = overlay::spawn(cfg.clone(), relics);
+        ov.send(overlay::OverlayCmd::Badges(badges));
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        let layers = overlay::CAPTURE.lock().unwrap().take().unwrap_or_default();
+        let mut out = img;
+        for (lx, ly, lw, lh, px) in layers.into_values() {
+            for yy in 0..lh {
+                for xx in 0..lw {
+                    let (sx, sy) = (lx + xx, ly + yy);
+                    if sx < 0 || sy < 0 || sx >= w || sy >= h {
+                        continue;
+                    }
+                    let i = ((yy * lw + xx) * 4) as usize;
+                    let a = px[i + 3] as u32;
+                    let d = out.get_pixel_mut(sx as u32, sy as u32);
+                    // premultiplied BGRA over RGBA
+                    for (c, s) in [(0usize, px[i + 2]), (1, px[i + 1]), (2, px[i])] {
+                        d.0[c] = (s as u32 + d.0[c] as u32 * (255 - a) / 255).min(255) as u8;
+                    }
+                }
+            }
+        }
+        out.save(output).map_err(|e| e.to_string())?;
+        log::info!("render: wrote {output}");
+        Ok(())
+    };
+    if let Err(e) = run() {
+        log::error!("render: {e}");
     }
 }

@@ -153,6 +153,10 @@ impl RelicClock {
 
 pub type RelicRef = Arc<Mutex<RelicClock>>;
 
+/// Relic centres on the Howling Abyss minimap (fraction of the map area), scoreboard order:
+/// blue inner, blue outer, red outer, red inner. Measured in game.
+pub const RELIC_UV: [(f32, f32); 4] = [(0.3748, 0.6895), (0.4627, 0.5925), (0.5912, 0.4659), (0.6941, 0.3818)];
+
 /// 1 -> "1st", 22 -> "22nd", 13 -> "13th".
 pub fn ordinal(n: u32) -> String {
     let suffix = match (n % 10, n % 100) {

@@ -71,6 +71,13 @@ impl OverlayHandle {
     }
 }
 
+/// Debug (`--render`): keep each drawn layer's pixels here instead of showing windows.
+pub static CAPTURE: std::sync::Mutex<Option<HashMap<isize, (i32, i32, i32, i32, Vec<u8>)>>> = std::sync::Mutex::new(None);
+
+fn capturing() -> bool {
+    CAPTURE.lock().map(|c| c.is_some()).unwrap_or(false)
+}
+
 pub fn spawn(cfg: Config, relics: RelicRef) -> OverlayHandle {
     let (tx, rx) = channel();
     let tid = Arc::new(AtomicU32::new(0));
@@ -470,6 +477,12 @@ impl Overlay {
             painter.rt.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
             draw(painter);
             let _ = painter.rt.EndDraw(None, None);
+            if let Ok(mut cap) = CAPTURE.lock() {
+                if let Some(cap) = cap.as_mut() {
+                    let px = std::slice::from_raw_parts(bits as *const u8, (w * h * 4) as usize).to_vec();
+                    cap.insert(layer.hwnd.0 as isize, (x, y, w, h, px));
+                }
+            }
             let blend = BLENDFUNCTION {
                 BlendOp: AC_SRC_OVER as u8,
                 BlendFlags: 0,
@@ -496,6 +509,15 @@ impl Overlay {
     }
 
     unsafe fn show(layer: &mut Layer, on: bool) {
+        if capturing() {
+            layer.visible = on;
+            if !on {
+                if let Ok(mut cap) = CAPTURE.lock() {
+                    cap.as_mut().map(|c| c.remove(&(layer.hwnd.0 as isize)));
+                }
+            }
+            return;
+        }
         if on {
             let _ = ShowWindow(layer.hwnd, SW_SHOWNOACTIVATE);
             Self::raise(layer);
@@ -516,6 +538,25 @@ impl Overlay {
             let layer = self.new_layer();
             self.badges.push(layer);
         }
+        if badges.is_empty() {
+            for layer in self.badges.iter_mut().filter(|l| l.visible) {
+                Self::show(layer, false);
+            }
+            return;
+        }
+        // One size for the whole offer, from the card spacing: OCR text boxes vary with
+        // descenders ("Mystic" vs "Sneakerhead"), the distance between cards doesn't.
+        // Measured on the cards: card width = 0.9 pitch, card top = 0.685 pitch above the title.
+        let cap = badges.iter().map(|b| b.h).fold(f32::INFINITY, f32::min).clamp(12.0, 40.0);
+        let mut centres: Vec<f32> = badges.iter().map(|b| b.x + b.w / 2.0).collect();
+        centres.sort_by(f32::total_cmp);
+        let gap = centres.windows(2).map(|w| w[1] - w[0]).filter(|d| *d > cap * 8.0).fold(f32::INFINITY, f32::min);
+        let gap = if gap > cap * 32.0 { gap / 2.0 } else { gap }; // cards 1 and 3 only
+        let pitch = if gap.is_finite() { gap } else { cap * 20.0 };
+        let u = pitch / 19.0 * self.cfg.badge_scale;
+        let card_w = pitch * 0.86;
+        let title_top = badges.iter().map(|b| b.y).fold(f32::INFINITY, f32::min);
+        let bottom = title_top - pitch * 0.685 - u * 0.3;
         for (i, layer) in self.badges.iter_mut().enumerate() {
             let Some(b) = badges.get(i) else {
                 if layer.visible {
@@ -524,36 +565,35 @@ impl Overlay {
                 continue;
             };
             let p = &mut self.painter;
-            let s = (b.h * 0.85).clamp(14.0, 44.0) * self.cfg.badge_scale;
-            let pad = s * 0.32;
-            let tier_t = p.text(b.tier.label(), s, DWRITE_FONT_WEIGHT_BOLD);
-            let mut detail = if b.wr.is_finite() { format!("{:.1}%", b.wr * 100.0) } else { "no data".into() };
-            if let Some(r) = b.round {
-                detail = format!("R{r}  {detail}");
-            }
-            if b.global {
-                detail.push_str(" (all)");
-            }
-            let detail_t = p.text(&detail, s * 0.78, DWRITE_FONT_WEIGHT_SEMI_BOLD);
-            let tag_t = b.rank.map(|(r, of)| p.text(&format!("{} / {of}", ordinal(r)), s * 0.62, DWRITE_FONT_WEIGHT_BOLD));
+            let pad = u * 0.55;
+            let tier_t = p.text(b.tier.label(), u * 1.25, DWRITE_FONT_WEIGHT_BOLD);
+            let wr = if b.wr.is_finite() { format!("{:.1}%", b.wr * 100.0) } else { "no data".into() };
+            let wr_t = p.text(&wr, u * 1.1, DWRITE_FONT_WEIGHT_SEMI_BOLD);
+            let sub = match (b.round, b.global) {
+                (_, true) => "all champions".to_string(),
+                (Some(r), _) => format!("round {r} win rate"),
+                (None, _) => "win rate".to_string(),
+            };
+            let sub_t = p.text(&sub, u * 0.62, DWRITE_FONT_WEIGHT_SEMI_BOLD);
+            let rank_t = b.rank.map(|(r, of)| (p.text(&ordinal(r), u * 1.0, DWRITE_FONT_WEIGHT_BOLD), p.text(&format!("of {of}"), u * 0.62, DWRITE_FONT_WEIGHT_SEMI_BOLD)));
             let fit_t = b.fit.as_ref().map(|(f, cats)| {
                 let head = match f {
                     Fit::Fits => "✓ FITS BUILD",
                     Fit::Off => "✗ OFF-BUILD",
                     Fit::Any => "• ANY BUILD",
                 };
-                (*f, p.text(&format!("{head} · {}", cats.join(" / ")), s * 0.58, DWRITE_FONT_WEIGHT_BOLD))
+                (*f, p.text(&format!("{head}  ·  {}", cats.join(" / ")), u * 0.66, DWRITE_FONT_WEIGHT_BOLD))
             });
-            let row1 = s * 1.45;
-            let tier_w = (tier_t.w + 2.0 * pad).max(s * 1.35);
-            let detail_w = detail_t.w + 2.0 * pad;
-            let tag_w = tag_t.as_ref().map(|t| t.w + 1.6 * pad).unwrap_or(0.0);
-            let row2 = fit_t.as_ref().map(|(_, t)| t.h + pad * 0.7).unwrap_or(0.0);
-            let inner_w = (tier_w + detail_w + tag_w + if tag_w > 0.0 { pad * 0.5 } else { 0.0 })
-                .max(fit_t.as_ref().map(|(_, t)| t.w + 2.0 * pad).unwrap_or(0.0));
-            let (w, h) = ((inner_w + 6.0).ceil(), (row1 + row2 + 6.0).ceil());
+            let row1 = u * 2.5;
+            let row2 = fit_t.as_ref().map(|(_, t)| t.h + pad * 0.9).unwrap_or(0.0);
+            let tier_w = (tier_t.w + 2.0 * pad).max(row1 - 6.0);
+            let rank_w = rank_t.as_ref().map(|(a, b)| a.w.max(b.w) + 2.0 * pad).unwrap_or(0.0);
+            let content_w = tier_w + pad + wr_t.w.max(sub_t.w) + pad * 2.0 + rank_w;
+            let fit_w = fit_t.as_ref().map(|(_, t)| t.w + 2.0 * pad).unwrap_or(0.0);
+            let w = card_w.max(content_w).max(fit_w).ceil();
+            let h = (row1 + row2 + 6.0 + if row2 > 0.0 { 3.0 } else { 0.0 }).ceil();
             let x = (b.x + b.w / 2.0 - w / 2.0) as i32;
-            let y = (b.y - h - b.h * 0.5) as i32;
+            let y = (bottom - h).max(0.0) as i32;
             let tier = b.tier;
             // the single best / worst augment of the whole set gets a coloured frame
             let border = match b.rank {
@@ -561,33 +601,43 @@ impl Overlay {
                 Some((r, of)) if r == of && of > 1 => [0xf8, 0x71, 0x71],
                 _ => tier.rgb(),
             };
-            let tag = b.rank.map(|(r, of)| rank_band(r, of));
+            let band = b.rank.map(|(r, of)| rank_band(r, of)).unwrap_or(0);
             Self::present(p, layer, x, y, w as i32, h as i32, |p| {
-                p.fill(0.5, 0.5, w - 1.0, h - 1.0, 6.0, BG, 0.95);
-                p.fill(3.0, 3.0, tier_w, row1, 4.0, tier.rgb(), 1.0);
+                p.fill(0.5, 0.5, w - 1.0, h - 1.0, 7.0, BG, 0.95);
+                // tier block
+                p.fill(3.0, 3.0, tier_w, row1, 5.0, tier.rgb(), 1.0);
                 p.draw(&tier_t, 3.0 + (tier_w - tier_t.w) / 2.0, 3.0 + (row1 - tier_t.h) / 2.0, tier.text_rgb());
-                p.draw(&detail_t, 3.0 + tier_w + pad, 3.0 + (row1 - detail_t.h) / 2.0, FG);
-                if let (Some(t), Some(tag)) = (&tag_t, tag) {
-                    let bx = w - 3.0 - tag_w;
-                    let bh = row1 * 0.66;
-                    let rgb = match tag {
+                // win rate + what it is
+                let tx = 3.0 + tier_w + pad;
+                let block = wr_t.h + sub_t.h * 0.9;
+                let ty = 3.0 + (row1 - block) / 2.0;
+                p.draw(&wr_t, tx, ty, FG);
+                p.draw(&sub_t, tx, ty + wr_t.h * 0.95, DIM);
+                // rank, right-aligned
+                if let Some((big, small)) = &rank_t {
+                    let rx = w - 3.0 - rank_w;
+                    let rgb = match band {
                         1 => [0x1f, 0x7a, 0x45],
                         -1 => [0x9b, 0x2c, 0x2c],
-                        _ => [0x3a, 0x41, 0x50],
+                        _ => [0x2a, 0x31, 0x3d],
                     };
-                    p.fill(bx, 3.0 + (row1 - bh) / 2.0, tag_w, bh, 3.0, rgb, 1.0);
-                    p.draw(t, bx + (tag_w - t.w) / 2.0, 3.0 + (row1 - t.h) / 2.0, [0xff, 0xff, 0xff]);
+                    p.fill(rx, 3.0, rank_w, row1, 5.0, rgb, 1.0);
+                    let block = big.h + small.h * 0.85;
+                    let ry = 3.0 + (row1 - block) / 2.0;
+                    p.draw(big, rx + (rank_w - big.w) / 2.0, ry, [0xff, 0xff, 0xff]);
+                    p.draw(small, rx + (rank_w - small.w) / 2.0, ry + big.h * 0.92, [0xd8, 0xde, 0xe6]);
                 }
                 if let Some((f, t)) = &fit_t {
-                    p.fill(3.0, 3.0 + row1, w - 6.0, row2, 3.0, BG2, 1.0);
+                    let fy = 3.0 + row1 + 3.0;
+                    p.fill(3.0, fy, w - 6.0, row2, 4.0, BG2, 1.0);
                     let rgb = match f {
                         Fit::Fits => [0x4a, 0xde, 0x80],
                         Fit::Off => [0xfb, 0x92, 0x3c],
                         Fit::Any => DIM,
                     };
-                    p.draw(t, 3.0 + pad, 3.0 + row1 + (row2 - t.h) / 2.0, rgb);
+                    p.draw(t, (w - t.w) / 2.0, fy + (row2 - t.h) / 2.0, rgb);
                 }
-                p.stroke(1.0, 1.0, w - 2.0, h - 2.0, 6.0, border, 2.0);
+                p.stroke(1.0, 1.0, w - 2.0, h - 2.0, 7.0, border, 2.0);
             });
             if !layer.visible {
                 Self::show(layer, true);
@@ -819,9 +869,7 @@ impl Overlay {
     /// A timer over each relic that's down, on the minimap (the game's own "+" icon marks
     /// the ones that are up).
     unsafe fn render_relics_minimap(&mut self, c: &crate::state::RelicClock, (mx, my, ms): (f32, f32, f32)) {
-        // relic centres on the Howling Abyss minimap (fraction of the map area), scoreboard
-        // order: blue inner, blue outer, red outer, red inner. Measured in game.
-        const RELIC_UV: [(f32, f32); 4] = [(0.3748, 0.6895), (0.4627, 0.5925), (0.5912, 0.4659), (0.6941, 0.3818)];
+        use crate::state::RELIC_UV;
         let now = c.now();
         let labels: Vec<Option<(String, f64)>> = (0..4)
             .map(|i| {
@@ -945,7 +993,8 @@ unsafe fn run(cfg: Config, rx: Receiver<OverlayCmd>, tid: Arc<AtomicU32>, relics
     ];
     let relic_keys: Vec<(i32, String)> =
         cfg.relic_hotkeys.iter().take(4).enumerate().map(|(i, k)| (11 + i as i32, k.clone())).collect();
-    for (id, combo) in hotkeys.iter().chain(relic_keys.iter()) {
+    let debug = capturing();
+    for (id, combo) in hotkeys.iter().chain(relic_keys.iter()).filter(|_| !debug) {
         match parse_hotkey(combo) {
             Some((m, vk)) => {
                 if RegisterHotKey(HWND::default(), *id, HOT_KEY_MODIFIERS(m), vk).is_err() {
@@ -958,7 +1007,7 @@ unsafe fn run(cfg: Config, rx: Receiver<OverlayCmd>, tid: Arc<AtomicU32>, relics
     // thread timers (no window) get IDs assigned by Windows: keep the ones it returns
     let raise_timer = SetTimer(HWND::default(), 0, 1500, None);
     let relic_timer = SetTimer(HWND::default(), 0, 200, None); // relic tick; redraws only when a digit changes
-    let tray = add_tray(hinst);
+    let tray = if debug { Default::default() } else { add_tray(hinst) };
 
     let mut ov = Overlay {
         cfg,

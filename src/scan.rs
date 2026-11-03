@@ -177,6 +177,20 @@ impl Reader {
         Ok(lines)
     }
 
+    /// Grab a rectangle and return its BGRA pixels (no OCR).
+    pub fn grab_raw(&mut self, x: i32, y: i32, w: i32, h: i32) -> &[u8] {
+        self.capture.grab(x, y, w, h);
+        &self.capture.buf
+    }
+
+    /// Debug: OCR a band of an image (BGRA) instead of the screen.
+    pub fn read_image(&mut self, img: &[u8], img_w: i32, y: i32, h: i32) -> Result<Vec<Vec<Word>>, String> {
+        let row = (img_w * 4) as usize;
+        self.capture.buf = img[y as usize * row..(y + h) as usize * row].to_vec();
+        self.capture.size = (img_w, h);
+        self.ocr_last(0, y)
+    }
+
     pub fn read(&mut self, x: i32, y: i32, w: i32, h: i32) -> Result<Vec<Vec<Word>>, String> {
         self.grab(x, y, w, h);
         self.ocr_last(x, y)
@@ -349,6 +363,12 @@ pub struct Scanner {
     relic_spacing: Option<f32>,
     relic_absent: [u8; 4],
     relic_band_misses: u8,
+    /// Minimap watch: consecutive reads with the relic's "+" seen / clearly gone, and when
+    /// it was first not seen (a champion icon may be covering it).
+    relic_seen: [u8; 4],
+    relic_gone: [u8; 4],
+    relic_left: [Option<f64>; 4],
+    relic_watch_at: Instant,
     layout: Layout,
     matcher: Option<(usize, Matcher)>,
     last_print: u64,
@@ -369,6 +389,10 @@ impl Scanner {
             relic_spacing,
             relic_absent: [0; 4],
             relic_band_misses: 0,
+            relic_seen: [0; 4],
+            relic_gone: [0; 4],
+            relic_left: [None; 4],
+            relic_watch_at: Instant::now(),
             layout,
             matcher: None,
             last_print: 0,
@@ -556,6 +580,97 @@ impl Scanner {
         log::debug!("relic sync: {seen:?}");
     }
 
+    /// Watch the relics' "+" icons on the minimap (4x a second, a ~160 px square grab):
+    /// an icon that disappears was picked up, one that appears early has respawned.
+    pub fn watch_relics(&mut self, relics: &RelicRef, cfg: &Config, dead: bool) {
+        if self.relic_watch_at.elapsed() < Duration::from_millis(250) {
+            return;
+        }
+        self.relic_watch_at = Instant::now();
+        let (mm, active) = {
+            let c = relics.lock().unwrap();
+            (cfg.relic_minimap.map(|m| (m[0], m[1], m[2])).or(c.minimap), c.active)
+        };
+        let Some((mx, my, ms)) = mm else { return };
+        if !active || dead || !league_in_front() {
+            self.relic_gone = [0; 4];
+            self.relic_left = [None; 4];
+            return;
+        }
+        let r = (ms * 0.025).round().max(4.0) as i32;
+        let x0 = (mx + 0.35 * ms) as i32 - r;
+        let y0 = (my + 0.36 * ms) as i32 - r;
+        let (w, h) = ((0.37 * ms) as i32 + 2 * r, (0.35 * ms) as i32 + 2 * r);
+        let buf = self.reader.grab_raw(x0, y0, w, h);
+        let mut state = [Icon::Gone; 4];
+        for (i, (u, v)) in crate::state::RELIC_UV.iter().enumerate() {
+            let (cx, cy) = ((mx + u * ms) as i32 - x0, (my + v * ms) as i32 - y0);
+            let (mut green, mut busy) = (0, 0);
+            for y in (cy - r).max(0)..(cy + r + 1).min(h) {
+                for x in (cx - r).max(0)..(cx + r + 1).min(w) {
+                    let k = ((y * w + x) * 4) as usize;
+                    let (b, g, rr) = (buf[k] as i32, buf[k + 1] as i32, buf[k + 2] as i32);
+                    if g > 140 && g > rr + 40 && g > b + 40 {
+                        green += 1;
+                    } else if rr.max(g).max(b) - rr.min(g).min(b) > 60 && rr.max(g).max(b) > 80 {
+                        busy += 1; // colourful: a champion icon, minions, a ping...
+                    }
+                }
+            }
+            let area = (2 * r + 1) * (2 * r + 1);
+            state[i] = if green >= 4 {
+                Icon::Up
+            } else if busy * 6 > area {
+                Icon::Covered
+            } else {
+                Icon::Gone
+            };
+        }
+        let mut c = relics.lock().unwrap();
+        let now = c.now();
+        let up: Vec<bool> = (0..4).map(|i| c.ready_at[i] <= now).collect();
+        // greyed / covered screen (death, a menu): everything that should be up is missing
+        if up.iter().filter(|u| **u).count() >= 2 && (0..4).filter(|i| up[*i]).all(|i| state[i] != Icon::Up) {
+            return;
+        }
+        for i in 0..4 {
+            match state[i] {
+                Icon::Up => {
+                    self.relic_gone[i] = 0;
+                    self.relic_left[i] = None;
+                    self.relic_seen[i] = self.relic_seen[i].saturating_add(1);
+                    if !up[i] && self.relic_seen[i] >= 3 && c.ready_at[i] - now > 3.0 {
+                        log::info!("relic {i}: up on the minimap ({:.0}s early)", c.ready_at[i] - now);
+                        c.ready_at[i] = now;
+                    }
+                }
+                Icon::Covered => {
+                    self.relic_seen[i] = 0;
+                    if up[i] && self.relic_left[i].is_none() {
+                        self.relic_left[i] = Some(now);
+                    }
+                }
+                Icon::Gone => {
+                    self.relic_seen[i] = 0;
+                    if !up[i] {
+                        self.relic_gone[i] = 0;
+                        self.relic_left[i] = None;
+                        continue;
+                    }
+                    // picked up when it was first hidden (a champion walked onto it), if recent
+                    let since = self.relic_left[i].get_or_insert(now).max(now - 6.0);
+                    self.relic_gone[i] += 1;
+                    if self.relic_gone[i] >= 3 {
+                        c.ready_at[i] = since + cfg.relic_beam_delay + cfg.relic_respawn;
+                        log::info!("relic {i}: taken (minimap) at {since:.0}s");
+                        self.relic_gone[i] = 0;
+                        self.relic_left[i] = None;
+                    }
+                }
+            }
+        }
+    }
+
     pub fn has_band(&self) -> bool {
         self.band.is_some()
     }
@@ -680,6 +795,23 @@ pub fn make_badges(hits: &[Hit], meta: &Meta, ctl: &crate::state::ScanCtl) -> Ve
         .collect()
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Icon {
+    Up,
+    Covered,
+    Gone,
+}
+
+/// The game window is in front (not alt-tabbed, not another app over it).
+fn league_in_front() -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetForegroundWindow};
+    unsafe {
+        let mut name = [0u16; 64];
+        let n = GetClassNameW(GetForegroundWindow(), &mut name);
+        String::from_utf16_lossy(&name[..n.max(0) as usize]) == "RiotWindowClass"
+    }
+}
+
 /// League's "Flip minimap" setting puts the minimap bottom-left.
 fn minimap_flipped(league_dir: &str) -> bool {
     std::fs::read_to_string(std::path::Path::new(league_dir).join("Config").join("game.cfg"))
@@ -772,6 +904,10 @@ pub fn spawn(cfg: Config, ctl: ScanRef, shared: SharedRef, relics: RelicRef, ove
                     scanner.relic_sync(&relics);
                 }
                 track_minimap(&cfg, scanner, &relics, &mut last_minimap);
+                let dead = || shared.read().unwrap().game.as_ref().is_some_and(|g| g.dead);
+                if cfg.relic_timers {
+                    scanner.watch_relics(&relics, &cfg, dead());
+                }
                 let t0 = Instant::now();
                 // a full sweep reads ~13 strips, so only fall back to it now and then
                 let full = (!scanner.has_band() && last_full.elapsed() > Duration::from_secs(2))
@@ -829,6 +965,9 @@ pub fn spawn(cfg: Config, ctl: ScanRef, shared: SharedRef, relics: RelicRef, ove
                 let deadline = t0 + Duration::from_millis(interval).max(Duration::from_millis(30));
                 while Instant::now() < deadline {
                     std::thread::sleep(Duration::from_millis(40));
+                    if cfg.relic_timers {
+                        scanner.watch_relics(&relics, &cfg, dead());
+                    }
                     if key_held(scoreboard_vk) && relics.lock().unwrap().active {
                         scanner.relic_sync(&relics);
                         std::thread::sleep(Duration::from_millis(210));
