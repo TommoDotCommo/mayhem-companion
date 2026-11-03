@@ -411,6 +411,15 @@ pub struct Scanner {
     /// The "+" has been seen since this relic was last due: only then can it be picked up.
     relic_was_up: [bool; 4],
     relic_watch_at: Instant,
+    /// Pickup times inferred from the minimap, until the scoreboard confirms them.
+    relic_pickup_at: [Option<f64>; 4],
+    /// Pickup -> respawn-timer start, learned from scoreboard reads (Tab).
+    beam_delay: f64,
+    beam_samples: u32,
+    respawn: f64,
+    /// Minimap frame when each relic's "+" first went missing (for the debug pictures).
+    relic_gone_frame: [Option<Vec<u8>>; 4],
+    debug_shots: u32,
     layout: Layout,
     matcher: Option<(usize, Matcher)>,
     last_print: u64,
@@ -437,6 +446,12 @@ impl Scanner {
             relic_gone_at: [None; 4],
             relic_was_up: [false; 4],
             relic_watch_at: Instant::now(),
+            relic_pickup_at: [None; 4],
+            beam_delay: load_beam_delay().map(|b| b.0).unwrap_or(cfg.relic_beam_delay),
+            beam_samples: load_beam_delay().map(|b| b.1).unwrap_or(0),
+            respawn: cfg.relic_respawn,
+            relic_gone_frame: Default::default(),
+            debug_shots: 0,
             layout,
             matcher: None,
             last_print: 0,
@@ -614,6 +629,21 @@ impl Scanner {
                     if (exact - c.ready_at[k]).abs() > 1.0 {
                         log::info!("relic {k}: scoreboard {secs}s, timer was {:+.1}s off", c.ready_at[k] - exact);
                     }
+                    // learn pickup -> timer start from a pickup the minimap saw
+                    if let Some(p) = self.relic_pickup_at[k].take() {
+                        let delay = exact - self.respawn - p;
+                        if (-1.0..8.0).contains(&delay) {
+                            self.beam_samples += 1;
+                            let w = 1.0 / (self.beam_samples.min(8) as f64);
+                            self.beam_delay = if self.beam_samples == 1 { delay } else { self.beam_delay * (1.0 - w) + delay * w };
+                            save_beam_delay(self.beam_delay, self.beam_samples);
+                            log::info!(
+                                "relic {k}: pickup -> timer start measured {delay:.2}s; using {:.2}s ({} samples)",
+                                self.beam_delay,
+                                self.beam_samples
+                            );
+                        }
+                    }
                     c.ready_at[k] = exact;
                     self.relic_absent[k] = 0;
                 }
@@ -629,10 +659,10 @@ impl Scanner {
         log::debug!("relic sync: {seen:?}");
     }
 
-    /// Watch the relics' "+" icons on the minimap (4x a second, a ~160 px square grab):
+    /// Watch the relics' "+" icons on the minimap (10x a second, a ~160 px square grab):
     /// an icon that disappears was picked up, one that appears early has respawned.
     pub fn watch_relics(&mut self, relics: &RelicRef, cfg: &Config, dead: bool) {
-        if self.relic_watch_at.elapsed() < Duration::from_millis(250) {
+        if self.relic_watch_at.elapsed() < Duration::from_millis(100) {
             return;
         }
         self.relic_watch_at = Instant::now();
@@ -651,7 +681,7 @@ impl Scanner {
         let x0 = (mx + 0.35 * ms) as i32 - r;
         let y0 = (my + 0.36 * ms) as i32 - r;
         let (w, h) = ((0.37 * ms) as i32 + 2 * r, (0.35 * ms) as i32 + 2 * r);
-        let buf = self.reader.grab_raw(x0, y0, w, h);
+        let buf = self.reader.grab_raw(x0, y0, w, h).to_vec();
         let mut state = [Icon::Gone; 4];
         for (i, (u, v)) in crate::state::RELIC_UV.iter().enumerate() {
             let (cx, cy) = ((mx + u * ms) as i32 - x0, (my + v * ms) as i32 - y0);
@@ -692,9 +722,11 @@ impl Scanner {
                     self.relic_left[i] = None;
                     self.relic_gone_at[i] = None;
                     self.relic_seen[i] = self.relic_seen[i].saturating_add(1);
-                    if !up[i] && self.relic_seen[i] >= 3 && c.ready_at[i] - now > 3.0 {
+                    if !up[i] && self.relic_seen[i] >= 5 && c.ready_at[i] - now > 3.0 {
                         log::info!("relic {i}: up on the minimap ({:.0}s early)", c.ready_at[i] - now);
                         c.ready_at[i] = now;
+                        self.relic_pickup_at[i] = None;
+                        self.debug_shot(i, "up-early", &buf, w, h);
                     }
                 }
                 Icon::Covered => {
@@ -716,15 +748,23 @@ impl Scanner {
                         self.relic_gone_at[i] = None;
                         continue;
                     }
+                    if self.relic_gone_at[i].is_none() {
+                        self.relic_gone_frame[i] = Some(buf.clone());
+                    }
                     let gone_at = *self.relic_gone_at[i].get_or_insert(now);
                     let hidden_at = *self.relic_left[i].get_or_insert(gone_at);
                     self.relic_gone[i] += 1;
-                    if self.relic_gone[i] >= 3 {
+                    // gone for a full second (back-dated below, so no accuracy lost)
+                    if now - gone_at >= 1.0 && self.relic_gone[i] >= 5 {
                         // A champion icon covers the relic ~1 s before the champion reaches it
                         // and until it walks off: the pickup is about a second into the cover,
                         // or halfway through a short one.
                         let since = if hidden_at < gone_at { (hidden_at + 1.0).min((hidden_at + gone_at) / 2.0) } else { gone_at };
-                        c.ready_at[i] = since + cfg.relic_beam_delay + cfg.relic_respawn;
+                        c.ready_at[i] = since + self.beam_delay + self.respawn;
+                        self.relic_pickup_at[i] = Some(since);
+                        let first = self.relic_gone_frame[i].take();
+                        self.debug_shot(i, "taken-first-gone", first.as_deref().unwrap_or(&buf), w, h);
+                        self.debug_shot(i, "taken-confirmed", &buf, w, h);
                         log::info!(
                             "relic {i}: taken (minimap) at {since:.1}s (covered {:.1}s, gone at {gone_at:.1}s)",
                             gone_at - hidden_at
@@ -736,6 +776,21 @@ impl Scanner {
                     }
                 }
             }
+        }
+    }
+
+    /// Save the watched minimap area as a PNG (relic_debug\), to see what the watch saw.
+    fn debug_shot(&mut self, relic: usize, what: &str, bgra: &[u8], w: i32, h: i32) {
+        if self.debug_shots >= 80 || bgra.len() < (w * h * 4) as usize {
+            return;
+        }
+        self.debug_shots += 1;
+        let dir = data_dir().join("relic_debug");
+        let _ = std::fs::create_dir_all(&dir);
+        let rgba: Vec<u8> = bgra.chunks_exact(4).flat_map(|p| [p[2], p[1], p[0], 255]).collect();
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+        if let Some(img) = image::RgbaImage::from_raw(w as u32, h as u32, rgba) {
+            let _ = img.save(dir.join(format!("{stamp}_relic{relic}_{what}.png")));
         }
     }
 
@@ -861,6 +916,19 @@ pub fn make_badges(hits: &[Hit], meta: &Meta, ctl: &crate::state::ScanCtl) -> Ve
             }
         })
         .collect()
+}
+
+fn beam_file() -> std::path::PathBuf {
+    data_dir().join("relic_calibration.json")
+}
+
+fn load_beam_delay() -> Option<(f64, u32)> {
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(beam_file()).ok()?).ok()?;
+    Some((v["beam_delay"].as_f64()?, v["samples"].as_u64()? as u32))
+}
+
+fn save_beam_delay(delay: f64, samples: u32) {
+    let _ = std::fs::write(beam_file(), serde_json::json!({ "beam_delay": delay, "samples": samples }).to_string());
 }
 
 #[derive(Clone, Copy, PartialEq)]
