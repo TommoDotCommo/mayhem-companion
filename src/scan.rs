@@ -52,6 +52,21 @@ mod tests {
         assert_eq!(parse_clock("Relic"), None);
     }
 
+    #[test]
+    fn split_titles_join() {
+        use super::{join_split_lines, Word};
+        let w = |t: &str, x: f32, y: f32, wd: f32| Word { text: t.into(), x, y, w: wd, h: 20.0 };
+        // as OCR returned "Lil' Extra Help" in game, next to another card's title
+        let lines = vec![
+            vec![w("Extra", 748.0, 582.0, 64.0), w("Help", 819.0, 581.0, 55.0)],
+            vec![w("CRIMSON", 1159.0, 582.0, 124.0), w("COBALT", 1291.0, 582.0, 110.0)],
+            vec![w("Lil'", 706.0, 581.0, 34.0)],
+        ];
+        let joined: Vec<String> =
+            join_split_lines(&lines).iter().map(|l| l.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ")).collect();
+        assert_eq!(joined, vec!["Lil' Extra Help", "CRIMSON COBALT"]);
+    }
+
     /// The frame as measured at 2560x1440 (MinimapScale 2.07): gold top bar at y=968,
     /// gold side bar at x=2089, map area 2111..2540 x 990..1418.
     #[test]
@@ -199,6 +214,28 @@ impl Reader {
 
 // ------------------------------------------------------------------ matching
 
+/// OCR sometimes returns one title as two lines ("Lil'" + "Extra Help"): join pieces that
+/// sit on the same baseline with a word-sized gap between them.
+fn join_split_lines(lines: &[Vec<Word>]) -> Vec<Vec<Word>> {
+    let mut sorted: Vec<Vec<Word>> = lines.iter().filter(|l| !l.is_empty()).cloned().collect();
+    sorted.sort_by(|a, b| a[0].x.total_cmp(&b[0].x));
+    let mut out: Vec<Vec<Word>> = Vec::new();
+    for line in sorted {
+        let first = &line[0];
+        let joined = out.iter_mut().find(|prev| {
+            let last = prev.last().unwrap();
+            let h = last.h.max(first.h);
+            let gap = first.x - (last.x + last.w);
+            (first.y - last.y).abs() < h * 0.45 && gap > -h * 0.2 && gap < h * 1.1
+        });
+        match joined {
+            Some(prev) => prev.extend(line),
+            None => out.push(line),
+        }
+    }
+    out
+}
+
 #[derive(Clone, Debug)]
 pub struct Hit {
     pub id: u32,
@@ -245,8 +282,9 @@ impl Matcher {
 
     /// Card titles in OCR output. `ignore` = screen rects of our own windows.
     pub fn find(&self, lines: &[Vec<Word>], ignore: &[(f32, f32, f32, f32)]) -> Vec<Hit> {
+        let lines = join_split_lines(lines);
         let mut hits: HashMap<u32, Hit> = HashMap::new();
-        for words in lines {
+        for words in &lines {
             let (cx, cy) = (words[0].x, words[0].y);
             if ignore.iter().any(|(x, y, w, h)| cx >= *x && cx <= x + w && cy >= *y && cy <= y + h) {
                 continue;
@@ -880,6 +918,8 @@ pub fn spawn(cfg: Config, ctl: ScanRef, shared: SharedRef, relics: RelicRef, ove
             // the offer that last closed: if it comes straight back, it wasn't a pick
             let mut last_closed: Vec<u32> = vec![];
             let mut closed_at = Instant::now();
+            // a scan that sees only some of the shown cards (one title misread this time)
+            let mut partial_since: Option<Instant> = None;
             let mut misses = 0u32;
             let mut last_full = Instant::now() - Duration::from_secs(60);
             let mut last_minimap = Instant::now() - Duration::from_secs(60);
@@ -939,7 +979,16 @@ pub fn spawn(cfg: Config, ctl: ScanRef, shared: SharedRef, relics: RelicRef, ove
                     last_full = Instant::now();
                 }
                 let hits = if full || scanner.has_band() { scanner.scan(&meta, full) } else { vec![] };
-                if !hits.is_empty() {
+                let partial = !hits.is_empty()
+                    && hits.len() < shown.len()
+                    && hits.iter().all(|h| shown.iter().any(|s| s.0 == h.id));
+                let hold = partial && partial_since.get_or_insert_with(Instant::now).elapsed() < Duration::from_millis(1500);
+                if !partial {
+                    partial_since = None;
+                }
+                if hold {
+                    misses = 0; // keep the full set on screen
+                } else if !hits.is_empty() {
                     misses = 0;
                     let key: Vec<(u32, i32, i32)> =
                         hits.iter().map(|h| (h.id, h.x as i32 / 20, h.y as i32 / 20)).collect();
