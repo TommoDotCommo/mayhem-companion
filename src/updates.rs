@@ -153,6 +153,8 @@ pub fn install_pending(background: bool) -> bool {
         let encoded = base64::engine::general_purpose::STANDARD.encode(script.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>());
         let mut command = std::process::Command::new("powershell.exe");
         command.args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-EncodedCommand", &encoded]);
+        // Let Windows PowerShell initialise its own modules when launched from PowerShell 7.
+        command.env_remove("PSModulePath");
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -200,11 +202,12 @@ mod installer_tests {
             let target = app.join("companion.exe");
             let started = dir.join("restarted.txt");
             let old = b"old executable";
-            let new = b"MZ verified new executable";
+            // Use a valid signed Windows executable rather than malformed .exe bytes that scanners may quarantine.
+            let new = std::fs::read(std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32").join("whoami.exe")).unwrap();
             std::fs::write(&target, old).unwrap();
-            std::fs::write(updates.join("pending.exe"), new).unwrap();
+            std::fs::write(updates.join("pending.exe"), &new).unwrap();
             std::fs::write(updates.join("pending.json"), b"test marker").unwrap();
-            let expected = if tampered { "0".repeat(64) } else { hash(new) };
+            let expected = if tampered { "0".repeat(64) } else { hash(&new) };
             // Stub only the final restart: exercise the real file replacement script without launching a second app.
             let script = format!(
                 "function Start-Process {{ param($FilePath, $ArgumentList) Set-Content -LiteralPath {} -Value $FilePath }}\n{}",
@@ -214,6 +217,7 @@ mod installer_tests {
             let encoded = base64::engine::general_purpose::STANDARD.encode(script.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>());
             let status = std::process::Command::new("powershell.exe")
                 .args(["-NoProfile", "-NonInteractive", "-EncodedCommand", &encoded])
+                .env_remove("PSModulePath")
                 .status()
                 .unwrap();
             assert!(status.success());
@@ -224,7 +228,7 @@ mod installer_tests {
                 assert!(updates.join("install-error.txt").exists());
                 assert!(!app.join("companion.exe.previous").exists());
             } else {
-                assert_eq!(std::fs::read(&target).unwrap(), new);
+                assert_eq!(std::fs::read(&target).unwrap(), new, "Installer error: {}", std::fs::read_to_string(updates.join("install-error.txt")).unwrap_or_default());
                 assert_eq!(std::fs::read(app.join("companion.exe.previous")).unwrap(), old);
                 assert!(!updates.join("pending.exe").exists());
                 assert!(!updates.join("install-error.txt").exists());
