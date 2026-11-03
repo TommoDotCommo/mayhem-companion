@@ -38,6 +38,8 @@ pub struct Engine {
     build: Option<BuildProfile>,
     level: u32,
     game_seen: bool,
+    /// Pick count restored (or started fresh) for the current game.
+    picks_loaded: bool,
     hide_panel_at: Option<Instant>,
     next_live: Instant,
 }
@@ -65,6 +67,7 @@ impl Engine {
             build: None,
             level: 0,
             game_seen: false,
+            picks_loaded: false,
             hide_panel_at: None,
             next_live: Instant::now(),
         }
@@ -390,6 +393,7 @@ impl Engine {
             let mut c = self.scan.lock().unwrap();
             c.mode = ScanMode::Off;
             c.picks = 0;
+            c.game_start = 0.0;
             c.max_round = 1;
             c.build = BuildProfile::default();
         }
@@ -398,6 +402,7 @@ impl Engine {
         self.build = None;
         self.level = 0;
         self.game_seen = false;
+        self.picks_loaded = false;
         self.overlay.send(OverlayCmd::Badges(vec![]));
         self.overlay.send(OverlayCmd::PanelVisible(Some(false)));
         let mut s = self.shared.write().unwrap();
@@ -428,6 +433,17 @@ impl Engine {
         let dead = me["isDead"].as_bool().unwrap_or(false);
         let items: Vec<u32> = me["items"].as_array().map(|a| a.iter().map(|i| u32_of(&i["itemID"])).collect()).unwrap_or_default();
         let game_time = v["gameData"]["gameTime"].as_f64().unwrap_or(0.0);
+        if !self.picks_loaded {
+            self.picks_loaded = true;
+            let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+            let start = unix - game_time;
+            let mut c = self.scan.lock().unwrap();
+            c.game_start = start;
+            if let Some(p) = crate::state::load_picks(start).filter(|p| *p > c.picks) {
+                log::info!("resumed this game's pick count: {p}");
+                c.picks = p;
+            }
+        }
         if self.cfg.relic_timers {
             let mut r = self.relics.lock().unwrap();
             // new game (or the clock jumped back): first spawns at 1:45 outer / 2:30 inner

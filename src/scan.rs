@@ -368,6 +368,8 @@ pub struct Scanner {
     relic_seen: [u8; 4],
     relic_gone: [u8; 4],
     relic_left: [Option<f64>; 4],
+    /// When the "+" was first clearly gone (not just covered).
+    relic_gone_at: [Option<f64>; 4],
     relic_watch_at: Instant,
     layout: Layout,
     matcher: Option<(usize, Matcher)>,
@@ -392,6 +394,7 @@ impl Scanner {
             relic_seen: [0; 4],
             relic_gone: [0; 4],
             relic_left: [None; 4],
+            relic_gone_at: [None; 4],
             relic_watch_at: Instant::now(),
             layout,
             matcher: None,
@@ -565,7 +568,12 @@ impl Scanner {
         for k in 0..4 {
             match seen[k] {
                 Some(secs) => {
-                    c.ready_at[k] = now + secs as f64 + 0.5;
+                    let exact = now + secs as f64 + 0.5;
+                    // how far off the timer was (the minimap watch, a hotkey, or the first spawn)
+                    if (exact - c.ready_at[k]).abs() > 1.0 {
+                        log::info!("relic {k}: scoreboard {secs}s, timer was {:+.1}s off", c.ready_at[k] - exact);
+                    }
+                    c.ready_at[k] = exact;
                     self.relic_absent[k] = 0;
                 }
                 None => {
@@ -595,6 +603,7 @@ impl Scanner {
         if !active || dead || !league_in_front() {
             self.relic_gone = [0; 4];
             self.relic_left = [None; 4];
+            self.relic_gone_at = [None; 4];
             return;
         }
         let r = (ms * 0.025).round().max(4.0) as i32;
@@ -629,8 +638,9 @@ impl Scanner {
         let mut c = relics.lock().unwrap();
         let now = c.now();
         let up: Vec<bool> = (0..4).map(|i| c.ready_at[i] <= now).collect();
-        // greyed / covered screen (death, a menu): everything that should be up is missing
-        if up.iter().filter(|u| **u).count() >= 2 && (0..4).filter(|i| up[*i]).all(|i| state[i] != Icon::Up) {
+        // greyed / dimmed screen (death, a menu): every relic that should be up reads as
+        // plain gone at once. (Gone next to covered is a normal fight around the relics.)
+        if up.iter().filter(|u| **u).count() >= 2 && (0..4).filter(|i| up[*i]).all(|i| state[i] == Icon::Gone) {
             return;
         }
         for i in 0..4 {
@@ -638,6 +648,7 @@ impl Scanner {
                 Icon::Up => {
                     self.relic_gone[i] = 0;
                     self.relic_left[i] = None;
+                    self.relic_gone_at[i] = None;
                     self.relic_seen[i] = self.relic_seen[i].saturating_add(1);
                     if !up[i] && self.relic_seen[i] >= 3 && c.ready_at[i] - now > 3.0 {
                         log::info!("relic {i}: up on the minimap ({:.0}s early)", c.ready_at[i] - now);
@@ -655,16 +666,25 @@ impl Scanner {
                     if !up[i] {
                         self.relic_gone[i] = 0;
                         self.relic_left[i] = None;
+                        self.relic_gone_at[i] = None;
                         continue;
                     }
-                    // picked up when it was first hidden (a champion walked onto it), if recent
-                    let since = self.relic_left[i].get_or_insert(now).max(now - 6.0);
+                    let gone_at = *self.relic_gone_at[i].get_or_insert(now);
+                    let hidden_at = *self.relic_left[i].get_or_insert(gone_at);
                     self.relic_gone[i] += 1;
                     if self.relic_gone[i] >= 3 {
+                        // A champion icon covers the relic ~1 s before the champion reaches it
+                        // and until it walks off: the pickup is about a second into the cover,
+                        // or halfway through a short one.
+                        let since = if hidden_at < gone_at { (hidden_at + 1.0).min((hidden_at + gone_at) / 2.0) } else { gone_at };
                         c.ready_at[i] = since + cfg.relic_beam_delay + cfg.relic_respawn;
-                        log::info!("relic {i}: taken (minimap) at {since:.0}s");
+                        log::info!(
+                            "relic {i}: taken (minimap) at {since:.1}s (covered {:.1}s, gone at {gone_at:.1}s)",
+                            gone_at - hidden_at
+                        );
                         self.relic_gone[i] = 0;
                         self.relic_left[i] = None;
+                        self.relic_gone_at[i] = None;
                     }
                 }
             }
@@ -857,6 +877,9 @@ pub fn spawn(cfg: Config, ctl: ScanRef, shared: SharedRef, relics: RelicRef, ove
             let mut scanner: Option<Scanner> = None;
             let mut off_since = Instant::now();
             let mut shown: Vec<(u32, i32, i32)> = vec![];
+            // the offer that last closed: if it comes straight back, it wasn't a pick
+            let mut last_closed: Vec<u32> = vec![];
+            let mut closed_at = Instant::now();
             let mut misses = 0u32;
             let mut last_full = Instant::now() - Duration::from_secs(60);
             let mut last_minimap = Instant::now() - Duration::from_secs(60);
@@ -930,6 +953,16 @@ pub fn spawn(cfg: Config, ctl: ScanRef, shared: SharedRef, relics: RelicRef, ove
                         s.cards.iter().map(|b| (b.tier, b.round)).ne(badges.iter().map(|b| (b.tier, b.round)))
                     };
                     if changed {
+                        if shown.is_empty() && !last_closed.is_empty() && closed_at.elapsed() < Duration::from_secs(20) {
+                            let same = hits.iter().filter(|h| last_closed.contains(&h.id)).count();
+                            if same >= 2.min(last_closed.len()) {
+                                let mut c = ctl.lock().unwrap();
+                                c.picks = c.picks.saturating_sub(1);
+                                crate::state::save_picks(c.game_start, c.picks);
+                                log::info!("same offer reopened: not a pick (picks {})", c.picks);
+                            }
+                            last_closed.clear();
+                        }
                         shown = key;
                         log::info!(
                             "cards: {}",
@@ -949,10 +982,13 @@ pub fn spawn(cfg: Config, ctl: ScanRef, shared: SharedRef, relics: RelicRef, ove
                 } else {
                     misses += 1;
                     if !shown.is_empty() && misses >= 2 {
+                        last_closed = shown.iter().map(|k| k.0).collect();
+                        closed_at = Instant::now();
                         shown.clear();
                         let picks = {
                             let mut c = ctl.lock().unwrap();
                             c.picks += 1;
+                            crate::state::save_picks(c.game_start, c.picks);
                             c.picks
                         };
                         log::info!("cards closed (pick {picks} made)");

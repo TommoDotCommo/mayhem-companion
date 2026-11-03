@@ -48,8 +48,27 @@ pub struct ScanCtl {
     pub max_round: u32,
     /// Card screens seen and closed this game (= picks made). The scanner increments it.
     pub picks: u32,
+    /// When this game started (unix seconds), to keep `picks` across a service restart.
+    pub game_start: f64,
     pub build: BuildProfile,
     pub error: Option<String>,
+}
+
+fn picks_file() -> std::path::PathBuf {
+    crate::config::data_dir().join("picks.json")
+}
+
+/// Remember the pick count for this game (a restart mid-game would otherwise lose it).
+pub fn save_picks(game_start: f64, picks: u32) {
+    if game_start > 0.0 {
+        let _ = std::fs::write(picks_file(), format!("{{\"start\":{game_start:.0},\"picks\":{picks}}}"));
+    }
+}
+
+/// The saved pick count, if it belongs to the game that started at `game_start`.
+pub fn load_picks(game_start: f64) -> Option<u32> {
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(picks_file()).ok()?).ok()?;
+    ((v["start"].as_f64()? - game_start).abs() < 30.0).then(|| v["picks"].as_u64().map(|p| p as u32)).flatten()
 }
 
 impl ScanCtl {
