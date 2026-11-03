@@ -408,6 +408,8 @@ pub struct Scanner {
     relic_left: [Option<f64>; 4],
     /// When the "+" was first clearly gone (not just covered).
     relic_gone_at: [Option<f64>; 4],
+    /// The "+" has been seen since this relic was last due: only then can it be picked up.
+    relic_was_up: [bool; 4],
     relic_watch_at: Instant,
     layout: Layout,
     matcher: Option<(usize, Matcher)>,
@@ -433,6 +435,7 @@ impl Scanner {
             relic_gone: [0; 4],
             relic_left: [None; 4],
             relic_gone_at: [None; 4],
+            relic_was_up: [false; 4],
             relic_watch_at: Instant::now(),
             layout,
             matcher: None,
@@ -684,6 +687,7 @@ impl Scanner {
         for i in 0..4 {
             match state[i] {
                 Icon::Up => {
+                    self.relic_was_up[i] = true;
                     self.relic_gone[i] = 0;
                     self.relic_left[i] = None;
                     self.relic_gone_at[i] = None;
@@ -701,7 +705,12 @@ impl Scanner {
                 }
                 Icon::Gone => {
                     self.relic_seen[i] = 0;
-                    if !up[i] {
+                    // a pickup is "+" seen, then gone. Never seen (spawning late, out of sight)
+                    // or not due yet: nothing to infer.
+                    if !up[i] || !self.relic_was_up[i] {
+                        if !up[i] {
+                            self.relic_was_up[i] = false;
+                        }
                         self.relic_gone[i] = 0;
                         self.relic_left[i] = None;
                         self.relic_gone_at[i] = None;
@@ -723,6 +732,7 @@ impl Scanner {
                         self.relic_gone[i] = 0;
                         self.relic_left[i] = None;
                         self.relic_gone_at[i] = None;
+                        self.relic_was_up[i] = false;
                     }
                 }
             }
