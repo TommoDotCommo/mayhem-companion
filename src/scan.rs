@@ -415,9 +415,9 @@ pub struct Scanner {
     relic_watch_at: Instant,
     /// Pickup times inferred from the minimap, until the scoreboard confirms them.
     relic_pickup_at: [Option<f64>; 4],
-    /// Pickup -> respawn-timer start, learned from scoreboard reads (Tab).
-    beam_delay: f64,
-    beam_samples: u32,
+    /// Learned from scoreboard reads (Tab): "+" vanishing -> respawn timer start (~0: the
+    /// "+" goes when the heal lands), and an icon reaching the relic -> timer start (the beam).
+    cal: Calibration,
     respawn: f64,
     /// Minimap frame when each relic's "+" first went missing (for the debug pictures).
     relic_gone_frame: [Option<Vec<u8>>; 4],
@@ -458,8 +458,7 @@ impl Scanner {
             relic_was_up: [false; 4],
             relic_watch_at: Instant::now(),
             relic_pickup_at: [None; 4],
-            beam_delay: load_beam_delay().map(|b| b.0).unwrap_or(cfg.relic_beam_delay),
-            beam_samples: load_beam_delay().map(|b| b.1).unwrap_or(0),
+            cal: Calibration::load(cfg.relic_beam_delay),
             respawn: cfg.relic_respawn,
             relic_gone_frame: Default::default(),
             relic_touch: [None; 4],
@@ -653,26 +652,22 @@ impl Scanner {
                     }
                     // learn pickup -> timer start from a pickup the minimap saw: a confirmed one,
                     // or an icon reaching the relic just before this new timer
-                    let new_timer = (exact - c.ready_at[k]).abs() > 1.0;
-                    let reach = self.relic_reach[k].filter(|t| {
-                        let d = exact - self.respawn - t;
-                        new_timer && (-1.0..8.0).contains(&d)
-                    });
-                    if let Some(p) = self.relic_pickup_at[k].take().or(reach) {
-                        self.relic_reach[k] = None;
-                        let delay = exact - self.respawn - p;
-                        if (-1.0..8.0).contains(&delay) {
-                            self.beam_samples += 1;
-                            let w = 1.0 / (self.beam_samples.min(8) as f64);
-                            self.beam_delay = if self.beam_samples == 1 { delay } else { self.beam_delay * (1.0 - w) + delay * w };
-                            save_beam_delay(self.beam_delay, self.beam_samples);
-                            log::info!(
-                                "relic {k}: pickup -> timer start measured {delay:.2}s; using {:.2}s ({} samples)",
-                                self.beam_delay,
-                                self.beam_samples
-                            );
+                    let start = exact - self.respawn;
+                    if let Some(v) = self.relic_pickup_at[k].take() {
+                        let d = start - v;
+                        if (-3.0..3.0).contains(&d) {
+                            self.cal.offset.add(d);
+                            log::info!("relic {k}: + vanished -> timer start {d:+.2}s; using {:+.2}s ({} samples)", self.cal.offset.v, self.cal.offset.n);
                         }
                     }
+                    if let Some(t) = self.relic_reach[k].take() {
+                        let d = start - t;
+                        if (0.0..6.0).contains(&d) {
+                            self.cal.beam.add(d);
+                            log::info!("relic {k}: icon reached -> timer start {d:.2}s; using {:.2}s ({} samples)", self.cal.beam.v, self.cal.beam.n);
+                        }
+                    }
+                    self.cal.save();
                     c.ready_at[k] = exact;
                     self.relic_absent[k] = 0;
                 }
@@ -817,19 +812,27 @@ impl Scanner {
                     self.relic_gone[i] += 1;
                     // gone (and uncovered) for a full second; the time is back-dated below
                     if now - gone_at >= 1.0 && self.relic_gone[i] >= 5 {
-                        let (since, how) = match (self.relic_touch[i], self.relic_closest[i]) {
-                            (Some(t), _) => (t, "icon reached it"),
-                            (None, Some((t, d))) if d <= pickup_px * 2.5 => (t, "icon closest"),
-                            _ if hidden_at < gone_at => ((hidden_at + 1.0).min((hidden_at + gone_at) / 2.0), "covered, estimated"),
-                            _ => (gone_at, "disappeared"),
+                        // The "+" vanishes when the heal lands, which starts the 90 s. Seen
+                        // vanishing: that's the moment. Under an icon: when the icon reached
+                        // the relic plus the beam, within the covered stretch.
+                        let reach = self.relic_reach[i]
+                            .or(self.relic_touch[i])
+                            .or(self.relic_closest[i].filter(|(_, d)| *d <= pickup_px * 2.5).map(|(t, _)| t))
+                            .filter(|t| *t <= gone_at && gone_at - t < 8.0);
+                        let (since, how) = if gone_at - hidden_at <= 0.15 {
+                            (gone_at, "seen vanishing")
+                        } else if let Some(t) = reach {
+                            ((t + self.cal.beam.v).clamp(hidden_at, gone_at), "icon reached it + beam")
+                        } else {
+                            ((hidden_at + gone_at) / 2.0, "covered, mid-point")
                         };
-                        c.ready_at[i] = since + self.beam_delay + self.respawn;
+                        c.ready_at[i] = since + self.cal.offset.v + self.respawn;
                         self.relic_pickup_at[i] = Some(since);
                         let first = self.relic_gone_frame[i].take();
                         self.debug_shot(i, "taken-first-gone", first.as_deref().unwrap_or(&buf), w, h);
                         self.debug_shot(i, "taken-confirmed", &buf, w, h);
                         log::info!(
-                            "relic {i}: taken (minimap) at {since:.1}s ({how}; covered from {hidden_at:.1}s, gone at {gone_at:.1}s)"
+                            "relic {i}: heal landed at {since:.1}s ({how}; covered from {hidden_at:.1}s, gone at {gone_at:.1}s)"
                         );
                         self.relic_gone[i] = 0;
                         self.relic_left[i] = None;
@@ -982,17 +985,44 @@ pub fn make_badges(hits: &[Hit], meta: &Meta, ctl: &crate::state::ScanCtl) -> Ve
         .collect()
 }
 
-fn beam_file() -> std::path::PathBuf {
-    data_dir().join("relic_calibration.json")
+/// A running average that settles after ~8 samples but keeps adapting.
+#[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
+struct Learned {
+    v: f64,
+    n: u32,
 }
 
-fn load_beam_delay() -> Option<(f64, u32)> {
-    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(beam_file()).ok()?).ok()?;
-    Some((v["beam_delay"].as_f64()?, v["samples"].as_u64()? as u32))
+impl Learned {
+    fn add(&mut self, x: f64) {
+        self.n += 1;
+        let w = 1.0 / self.n.min(8) as f64;
+        self.v = if self.n == 1 { x } else { self.v * (1.0 - w) + x * w };
+    }
 }
 
-fn save_beam_delay(delay: f64, samples: u32) {
-    let _ = std::fs::write(beam_file(), serde_json::json!({ "beam_delay": delay, "samples": samples }).to_string());
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+struct Calibration {
+    offset: Learned,
+    beam: Learned,
+}
+
+impl Calibration {
+    fn path() -> std::path::PathBuf {
+        data_dir().join("relic_calibration.json")
+    }
+
+    fn load(default_beam: f64) -> Calibration {
+        std::fs::read_to_string(Self::path())
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or(Calibration { offset: Learned { v: 0.0, n: 0 }, beam: Learned { v: default_beam, n: 0 } })
+    }
+
+    fn save(&self) {
+        if let Ok(t) = serde_json::to_string(self) {
+            let _ = std::fs::write(Self::path(), t);
+        }
+    }
 }
 
 /// Distance from (cx, cy) to the nearest champion icon centre within `search` px: a ring of
