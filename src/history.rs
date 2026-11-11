@@ -75,7 +75,7 @@ pub fn summarize(games: &[MatchRecord], group: Group) -> Vec<(u32, Summary)> {
 pub fn account_key(puuid: &str) -> String {
     format!("{:x}", Sha256::digest(puuid.as_bytes()))
 }
-fn safe_key(key: &str) -> bool {
+pub fn safe_key(key: &str) -> bool {
     key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit())
 }
 fn file(dir: &Path, account: &str) -> Result<PathBuf, String> {

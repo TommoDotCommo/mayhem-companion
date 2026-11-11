@@ -79,7 +79,17 @@ pub fn setup(ctx: &egui::Context) {
         s.text_styles.insert(TextStyle::Heading, bold(22.0));
         s.spacing.item_spacing = vec2(8.0, 6.0);
         s.spacing.button_padding = vec2(12.0, 6.0);
-        s.spacing.scroll.bar_width = 8.0;
+        // Solid, always-visible bars: the floating default hides them until hovered, so pages didn't look scrollable.
+        s.spacing.scroll = egui::style::ScrollStyle {
+            bar_width: 8.0,
+            bar_inner_margin: 6.0,
+            foreground_color: true,
+            dormant_background_opacity: 0.0,
+            dormant_handle_opacity: 0.3,
+            active_handle_opacity: 0.5,
+            interact_handle_opacity: 0.75,
+            ..egui::style::ScrollStyle::solid()
+        };
         let v = &mut s.visuals;
         *v = egui::Visuals::dark();
         v.panel_fill = BG;
@@ -211,5 +221,25 @@ pub fn wr_color(delta: f64) -> Color32 {
         WARN
     } else {
         BAD
+    }
+}
+
+/// A full-width vertical page scroller. The bar sits at the window edge, and a fade at the bottom
+/// shows when there's more below.
+pub fn page_scroll(ui: &mut Ui, id: &str, add: impl FnOnce(&mut Ui)) {
+    let out = egui::ScrollArea::vertical().id_salt(id).auto_shrink([false, false]).show(ui, add);
+    let r = out.inner_rect;
+    let hidden = out.content_size.y - out.state.offset.y - r.height();
+    if hidden > 1.0 {
+        let fade = Rect::from_min_max(egui::pos2(r.left(), r.bottom() - 48.0_f32.min(hidden.max(16.0))), r.right_bottom());
+        let mut mesh = egui::Mesh::default();
+        let clear = Color32::from_rgba_premultiplied(0, 0, 0, 0);
+        mesh.colored_vertex(fade.left_top(), clear);
+        mesh.colored_vertex(fade.right_top(), clear);
+        mesh.colored_vertex(fade.right_bottom(), BG);
+        mesh.colored_vertex(fade.left_bottom(), BG);
+        mesh.add_triangle(0, 1, 2);
+        mesh.add_triangle(0, 2, 3);
+        ui.painter().add(egui::Shape::mesh(mesh));
     }
 }

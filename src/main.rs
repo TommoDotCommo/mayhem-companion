@@ -19,6 +19,9 @@ mod ipc;
 mod item_sets;
 mod insights;
 mod history;
+mod facts;
+mod challenges;
+mod diagnostics;
 mod lcu;
 mod logger;
 mod model;
@@ -63,6 +66,7 @@ fn main() {
     let mode = args.first().map(String::as_str).unwrap_or("");
     logger::init(if mode == "--companion" { "ui " } else { "svc" });
     let cfg = Config::load();
+    diagnostics::ENABLED.store(cfg.save_diagnostics, std::sync::atomic::Ordering::Relaxed);
     let data = data::Data::new(&cfg.data_url, cfg.cache_hours);
     data.start_refresh(state::repaint);
     match mode {

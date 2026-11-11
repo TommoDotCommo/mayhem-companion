@@ -67,6 +67,22 @@ mod tests {
         assert_eq!(joined, vec!["Lil' Extra Help", "CRIMSON COBALT"]);
     }
 
+    #[test]
+    fn titles_stand_alone() {
+        use super::{Matcher, Word};
+        let w = |t: &str, x: f32, wd: f32| Word { text: t.into(), x, y: 582.0, w: wd, h: 20.0 };
+        let names = [("power", 1), ("crimsoncobalt", 2), ("escapeplan", 3)].into_iter().map(|(n, id)| (n.to_string(), id)).collect::<std::collections::HashMap<_, _>>();
+        let m = Matcher { keys: names.keys().cloned().collect(), names };
+        let ids = |lines: &[Vec<Word>]| m.find(lines, &[]).iter().map(|h| h.id).collect::<Vec<_>>();
+        // an item tooltip: POWER is part of a phrase
+        assert!(ids(&[vec![w("+40", 900.0, 40.0), w("Ability", 948.0, 70.0), w("Power", 1026.0, 60.0)]]).is_empty());
+        assert!(ids(&[vec![w("Power", 900.0, 60.0), w("Spike", 968.0, 60.0)]]).is_empty());
+        // a title alone on its line, and neighbouring titles OCR merged into one line
+        assert_eq!(ids(&[vec![w("POWER", 900.0, 70.0)]]), vec![1]);
+        let merged = vec![w("POWER", 500.0, 70.0), w("CRIMSON", 1159.0, 124.0), w("COBALT", 1291.0, 110.0), w("Escape", 1900.0, 70.0), w("Plan", 1978.0, 50.0)];
+        assert_eq!(ids(&[merged]), vec![1, 2, 3]);
+    }
+
     /// The frame as measured at 2560x1440 (MinimapScale 2.07): gold top bar at y=968,
     /// gold side bar at x=2089, map area 2111..2540 x 990..1418.
     #[test]
@@ -308,6 +324,13 @@ impl Matcher {
                 let text = text.join(" ");
                 let id = if (i, j) == (0, n) { self.lookup(&text) } else { self.names.get(&norm(&text)).copied() };
                 let Some(id) = id else { continue };
+                // A title stands alone. A name found inside a longer phrase ("Ability Power" in an
+                // item tooltip holds POWER) is ordinary text, not a card.
+                let h = words[i].h.max(words[j - 1].h);
+                let close = |a: &Word, b: &Word| b.x - (a.x + a.w) < h * 1.5;
+                if (i > 0 && close(&words[i - 1], &words[i])) || (j < n && close(&words[j - 1], &words[j])) {
+                    continue;
+                }
                 used[i..j].iter_mut().for_each(|u| *u = true);
                 let x0 = words[i..j].iter().map(|w| w.x).fold(f32::MAX, f32::min);
                 let y0 = words[i..j].iter().map(|w| w.y).fold(f32::MAX, f32::min);
@@ -433,6 +456,9 @@ pub struct Scanner {
     matcher: Option<(usize, Matcher)>,
     last_print: u64,
     last_found: Vec<Hit>,
+    /// The text behind the last scan that ran OCR, and the rectangle it was read from (diagnostics).
+    last_lines: Vec<Vec<Word>>,
+    last_rect: (i32, i32, i32, i32),
 }
 
 impl Scanner {
@@ -470,6 +496,8 @@ impl Scanner {
             matcher: None,
             last_print: 0,
             last_found: vec![],
+            last_lines: vec![],
+            last_rect: (0, 0, 0, 0),
         })
     }
 
@@ -520,6 +548,8 @@ impl Scanner {
             };
             let found = self.matcher(meta).find(&lines, &ignore);
             self.last_found = found.clone();
+            self.last_lines = lines;
+            self.last_rect = (x0, top, w, bottom - top);
             return found;
         }
         for (x, y, w, h) in self.sweep_bands() {
@@ -546,6 +576,8 @@ impl Scanner {
                 self.band = Some(band);
                 self.last_print = 0;
                 self.last_found = found.clone();
+                self.last_lines = lines;
+                self.last_rect = (x, y, w, h);
                 return found;
             }
         }
@@ -863,6 +895,58 @@ impl Scanner {
         }
     }
 
+    /// The capture hotkey: read every strip of the screen, so the notes show what could have been
+    /// found even where nothing was, then save a capture with the badges currently up.
+    fn diagnostic_now(&mut self, badges: &[Badge], ctl: &ScanRef, champ: Option<u32>) {
+        let bands = self.sweep_bands();
+        let mut lines = vec![];
+        for (x, y, w, h) in &bands {
+            lines.extend(self.reader.read(*x, *y, *w, *h).unwrap_or_default());
+        }
+        if let (Some(first), Some(last)) = (bands.first(), bands.last()) {
+            self.last_rect = (first.0, first.1, first.2, last.1 + last.3 - first.1);
+        }
+        self.last_lines = lines;
+        self.last_print = 0; // the reader moved: read the strip afresh on the next scan
+        self.diagnostic("hotkey", true, badges, ctl, champ);
+        unsafe {
+            let _ = windows::Win32::System::Diagnostics::Debug::MessageBeep(windows::Win32::UI::WindowsAndMessaging::MB_OK);
+        }
+        log::info!("diagnostic capture saved (hotkey)");
+    }
+
+    /// Diagnostics (opt-in): save the whole screen with what was read and decided, as badges go up.
+    /// The overlay is hidden from capture, so the badges themselves are described in the notes.
+    fn diagnostic(&mut self, reason: &str, full: bool, badges: &[Badge], ctl: &ScanRef, champ: Option<u32>) {
+        let (sw, sh) = self.reader.screen;
+        let screen = self.reader.grab_raw(0, 0, sw, sh).to_vec();
+        let (picks, round) = {
+            let c = ctl.lock().unwrap();
+            (c.picks, c.round())
+        };
+        let rect = |x: f32, y: f32, w: f32, h: f32| serde_json::json!([x.round(), y.round(), w.round(), h.round()]);
+        let info = serde_json::json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "reason": reason,
+            "screen": [sw, sh],
+            "capture": self.reader.backend(),
+            "full_sweep": full,
+            "strip": self.band,
+            "read_rect": [self.last_rect.0, self.last_rect.1, self.last_rect.2, self.last_rect.3],
+            "champion": champ,
+            "picks": picks,
+            "round": round,
+            "ignored_windows": own_windows().iter().map(|r| rect(r.0, r.1, r.2, r.3)).collect::<Vec<_>>(),
+            "badges": badges.iter().map(|b| serde_json::json!({
+                "id": b.aug_id, "name": b.name, "tier": b.tier.label(), "rect": rect(b.x, b.y, b.w, b.h),
+            })).collect::<Vec<_>>(),
+            "ocr_lines": self.last_lines.iter().map(|l| l.iter().map(|w| serde_json::json!({
+                "text": w.text, "rect": rect(w.x, w.y, w.w, w.h),
+            })).collect::<Vec<_>>()).collect::<Vec<_>>(),
+        });
+        crate::diagnostics::save(screen, sw as u32, sh as u32, info);
+    }
+
     pub fn has_band(&self) -> bool {
         self.band.is_some()
     }
@@ -1166,9 +1250,19 @@ pub fn spawn(cfg: Config, ctl: ScanRef, shared: SharedRef, relics: RelicRef, ove
                     }
                 }
                 let Some(scanner) = scanner.as_mut() else {
+                    if crate::diagnostics::REQUESTED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                        log::info!("diagnostic capture skipped: only available in a game");
+                    }
                     std::thread::sleep(Duration::from_millis(500));
                     continue;
                 };
+                if crate::diagnostics::REQUESTED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                    let (cards, champ) = {
+                        let s = shared.read().unwrap();
+                        (s.cards.clone(), s.game.as_ref().and_then(|g| g.champ))
+                    };
+                    scanner.diagnostic_now(&cards, &ctl, champ);
+                }
                 let Some(meta) = meta.filter(|_| interval > 0) else {
                     if !shown.is_empty() {
                         shown.clear();
@@ -1202,9 +1296,12 @@ pub fn spawn(cfg: Config, ctl: ScanRef, shared: SharedRef, relics: RelicRef, ove
                 if !partial {
                     partial_since = None;
                 }
+                // An offer is several cards: one lone name is stray text (a tooltip, chat), unless
+                // it is what's left of the offer already showing.
+                let plausible = hits.len() >= 2 || (!hits.is_empty() && hits.iter().all(|h| shown.iter().any(|s| s.0 == h.id)));
                 if hold {
                     misses = 0; // keep the full set on screen
-                } else if !hits.is_empty() {
+                } else if plausible {
                     misses = 0;
                     let key: Vec<(u32, i32, i32)> =
                         hits.iter().map(|h| (h.id, h.x as i32 / 20, h.y as i32 / 20)).collect();
@@ -1227,6 +1324,10 @@ pub fn spawn(cfg: Config, ctl: ScanRef, shared: SharedRef, relics: RelicRef, ove
                                 log::info!("same offer reopened: not a pick (picks {})", c.picks);
                             }
                             last_closed.clear();
+                        }
+                        if crate::diagnostics::enabled() {
+                            let champ = shared.read().unwrap().game.as_ref().and_then(|g| g.champ);
+                            scanner.diagnostic(if shown.is_empty() { "opened" } else { "changed" }, full, &badges, &ctl, champ);
                         }
                         shown = key;
                         log::info!(

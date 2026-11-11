@@ -47,6 +47,8 @@ pub struct Engine {
     next_history: Instant,
     history_busy: Arc<AtomicBool>,
     history_epoch: Arc<AtomicU64>,
+    /// Unix seconds of the last challenge fetch (the response is large, so it's throttled).
+    challenges_at: Arc<AtomicU64>,
 }
 
 fn u32_of(v: &Value) -> u32 {
@@ -79,6 +81,7 @@ impl Engine {
             next_history: Instant::now(),
             history_busy: Arc::new(AtomicBool::new(false)),
             history_epoch: Arc::new(AtomicU64::new(0)),
+            challenges_at: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -97,7 +100,7 @@ impl Engine {
             }
             if self.lcu.is_some() && !matches!(self.phase.as_str(), "ChampSelect" | "GameStart" | "InProgress" | "Reconnect") && Instant::now() >= self.next_history {
                 self.next_history = Instant::now() + Duration::from_secs(60);
-                self.sync_history();
+                self.sync_history(false);
             }
             if self.in_game() && Instant::now() >= self.next_live {
                 self.next_live = Instant::now() + Duration::from_secs(1);
@@ -110,7 +113,8 @@ impl Engine {
         }
     }
 
-    fn sync_history(&self) {
+    /// `force` also refreshes challenge progress now instead of on its slower schedule.
+    fn sync_history(&self, force: bool) {
         let Some(lcu) = self.lcu.clone() else { return };
         if self.history_busy.swap(true, Ordering::SeqCst) { return; }
         let busy = self.history_busy.clone();
@@ -118,6 +122,7 @@ impl Engine {
         let generation = epoch.load(Ordering::SeqCst);
         let shared = self.shared.clone();
         let queues = self.cfg.mayhem_queue_ids.clone();
+        let challenges_at = self.challenges_at.clone();
         shared.write().unwrap().history_status = "Importing recent Mayhem matches…".into();
         repaint();
         std::thread::spawn(move || {
@@ -134,8 +139,27 @@ impl Engine {
                         repaint();
                     }
                 });
+            // Challenge progress: after a new game, on request, or every 10 minutes.
+            let mut challenges_changed = false;
+            if let Ok(result) = &result {
+                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+                let dir = crate::config::data_dir().join("history");
+                let missing = crate::challenges::load(&dir, &result.account).is_none();
+                if force || missing || result.added > 0 || now.as_secs().saturating_sub(challenges_at.load(Ordering::SeqCst)) >= 600 {
+                    match crate::challenges::sync(&dir, &result.account,
+                        |path| lcu.get(path).ok_or_else(|| "League challenges are unavailable".into()), now.as_millis() as u64) {
+                        Ok(_) => {
+                            challenges_at.store(now.as_secs(), Ordering::SeqCst);
+                            // Reload in the companion even when nothing moved, so "updated" stays current.
+                            challenges_changed = true;
+                        }
+                        Err(e) => log::warn!("challenges: {e}"),
+                    }
+                }
+            }
             if epoch.load(Ordering::SeqCst) == generation {
                 let mut s = shared.write().unwrap();
+                if challenges_changed { s.history_revision += 1; }
                 match result {
                     Ok(result) => {
                         if s.history_account != result.account || result.added > 0 { s.history_revision += 1; }
@@ -442,6 +466,7 @@ impl Engine {
             UiCmd::ReloadSettings => {
                 let was_auto = self.cfg.auto_update_app;
                 self.cfg = Config::load();
+                crate::diagnostics::ENABLED.store(self.cfg.save_diagnostics, Ordering::Relaxed);
                 if self.cfg.auto_update_app && !was_auto { crate::updates::check_async(self.shared.clone()); }
                 if self.phase == "ChampSelect" {
                     if let Some(cid) = self.imported {
@@ -455,7 +480,7 @@ impl Engine {
                 if matches!(self.phase.as_str(), "ChampSelect" | "GameStart" | "InProgress" | "Reconnect") {
                     self.shared.write().unwrap().history_status = "History sync resumes after the game".into();
                     repaint();
-                } else if self.lcu.is_some() { self.sync_history(); }
+                } else if self.lcu.is_some() { self.sync_history(true); }
                 else { self.shared.write().unwrap().history_status = "Open League to import recent Mayhem matches".into(); repaint(); }
                 return;
             }

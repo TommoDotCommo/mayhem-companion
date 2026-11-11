@@ -33,6 +33,8 @@ pub struct Config {
     pub panel_hotkey: String,
     pub companion_hotkey: String,
     pub quit_hotkey: String,
+    /// Saves a diagnostic screenshot of this moment (in game), whether or not automatic ones are on.
+    pub capture_hotkey: String,
     pub import_item_set: bool,
     pub combined_item_sets: bool,
     pub replace_tool_builds: bool,
@@ -49,6 +51,8 @@ pub struct Config {
     pub smoothing_games: f64,
     pub champion_smoothing_games: f64,
     pub scan_cards: bool,
+    /// Keep a screenshot and the scanner's notes each time augment badges appear (see `diagnostics`).
+    pub save_diagnostics: bool,
     pub ocr_language: String,
     pub scan_interval_fast_ms: u64,
     pub scan_interval_slow_ms: u64,
@@ -85,6 +89,7 @@ impl Default for Config {
             panel_hotkey: "F8".into(),
             companion_hotkey: "F7".into(),
             quit_hotkey: "ctrl+shift+F8".into(),
+            capture_hotkey: "F9".into(),
             import_item_set: true,
             combined_item_sets: false,
             replace_tool_builds: true,
@@ -113,6 +118,7 @@ impl Default for Config {
             smoothing_games: 300.0,
             champion_smoothing_games: 2000.0,
             scan_cards: true,
+            save_diagnostics: false,
             ocr_language: "en-US".into(),
             scan_interval_fast_ms: 300,
             scan_interval_slow_ms: 2500,

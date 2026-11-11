@@ -157,6 +157,10 @@ impl Data {
         self.champs.read().unwrap().get(&cid).cloned()
     }
 
+    pub fn items_cached(&self) -> Option<Arc<HashMap<String, DdItem>>> {
+        self.items.read().unwrap().clone()
+    }
+
     pub fn items(&self) -> Result<Arc<HashMap<String, DdItem>>, String> {
         if let Some(i) = self.items.read().unwrap().as_ref() {
             return Ok(i.clone());

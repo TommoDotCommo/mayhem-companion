@@ -1,4 +1,5 @@
 use super::*;
+use crate::facts::{Fact, Tone};
 use crate::history::{self, Group, MatchRecord, Summary};
 
 fn ago(created: u64) -> String {
@@ -28,6 +29,54 @@ fn augment_name(meta: Option<&Meta>, id: u32) -> String {
         .unwrap_or_else(|| format!("Augment #{id}"))
 }
 
+/// Highlight cards in as many equal columns as fit.
+fn fact_cards(ui: &mut Ui, facts: &[Fact]) {
+    let gap = 10.0;
+    let avail = ui.available_width();
+    let cols = ((avail + gap) / (250.0 + gap)).floor().max(1.0) as usize;
+    let width = ((avail - gap * (cols - 1) as f32) / cols as f32).floor();
+    for row in facts.chunks(cols) {
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            for fact in row {
+                let color = match fact.tone {
+                    Tone::Good => GOOD,
+                    Tone::Bad => BAD,
+                    Tone::Neutral => ACCENT,
+                };
+                let resp = egui::Frame::none()
+                    .fill(CARD)
+                    .stroke(Stroke::new(1.0_f32, BORDER))
+                    .rounding(Rounding::same(8.0))
+                    .inner_margin(Margin { left: 16.0, right: 12.0, top: 10.0, bottom: 10.0 })
+                    .show(ui, |ui| {
+                        ui.set_width(width - 30.0);
+                        ui.set_min_height(84.0);
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 3.0;
+                            ui.label(RichText::new(fact.title.to_uppercase()).font(semi(11.5)).color(DIM));
+                            ui.label(RichText::new(&fact.value).font(bold(20.0)).color(color));
+                            ui.label(RichText::new(&fact.detail).font(reg(12.5)));
+                        });
+                    })
+                    .response;
+                let r = resp.rect;
+                ui.painter().rect_filled(
+                    Rect::from_min_max(r.left_top() + vec2(1.0, 8.0), pos2(r.left() + 4.0, r.bottom() - 8.0)),
+                    Rounding::same(1.5),
+                    color,
+                );
+            }
+        });
+        ui.add_space(gap - ui.spacing().item_spacing.y);
+    }
+    ui.label(
+        RichText::new("Highlights only appear once a pattern has enough games behind it. They describe your games, not what causes wins.")
+            .font(reg(12.0))
+            .color(FAINT),
+    );
+}
+
 impl App {
     pub(super) fn tab_history(&mut self, ctx: &egui::Context, meta: Option<&Meta>) {
         let (account, revision, status) = {
@@ -52,7 +101,7 @@ impl App {
             }
         }
         egui::CentralPanel::default().show(ctx, |ui| {
-            ScrollArea::vertical().id_salt("history-page").show(ui, |ui| {
+            page_scroll(ui, "history-page", |ui| {
                 ui.heading("Your Mayhem history");
                 ui.label(RichText::new("Saved on this PC. Accounts are kept separate. Only your own match statistics are stored.").color(DIM));
                 ui.horizontal(|ui| {
@@ -131,7 +180,20 @@ impl App {
                     RichText::new("Personal samples can be small. Item and augment results describe your games, not their independent effect on winning.")
                         .color(DIM),
                 );
-                ui.add_space(10.0);
+                let items = self.data.items_cached();
+                if items.is_none() {
+                    self.data.load_async("items".into(), |d| d.items().map(|_| ()), repaint);
+                }
+                let highlights = crate::facts::facts(&games, meta, items.as_deref());
+                ui.add_space(14.0);
+                ui.heading("Highlights");
+                if highlights.is_empty() {
+                    ui.label(RichText::new("Play a few more Mayhem games with the companion open and highlights will appear here.").color(DIM));
+                } else {
+                    fact_cards(ui, &highlights);
+                }
+                ui.add_space(14.0);
+                ui.heading("Breakdown");
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.history_group, Group::Champion, "Champions");
                     ui.selectable_value(&mut self.history_group, Group::Augment, "Augments");

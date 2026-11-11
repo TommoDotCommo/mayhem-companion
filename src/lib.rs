@@ -8,3 +8,6 @@ pub mod data;
 
 pub mod insights;
 pub mod history;
+pub mod facts;
+pub mod challenges;
+pub mod diagnostics;

@@ -1,5 +1,6 @@
 //! Companion window (egui, GPU-rendered, repaints only on input or new data).
 
+mod challenges;
 mod images;
 mod history;
 mod insights;
@@ -26,6 +27,7 @@ enum Tab {
     Augments,
     Settings,
     History,
+    Challenges,
     Changes,
 }
 
@@ -87,6 +89,12 @@ pub struct App {
     history_search: String,
     history_patch: String,
     history_group: crate::history::Group,
+    challenges: Option<crate::challenges::Snapshot>,
+    challenges_key: (String, u64),
+    /// One-per-champion challenges whose champion list is showing.
+    challenges_open: std::collections::HashSet<u64>,
+    challenges_search: String,
+    challenges_show: challenges::ListShow,
 }
 
 impl App {
@@ -121,6 +129,11 @@ impl App {
             history_search: String::new(),
             history_patch: String::new(),
             history_group: crate::history::Group::Champion,
+            challenges: None,
+            challenges_key: (String::new(), u64::MAX),
+            challenges_open: Default::default(),
+            challenges_search: String::new(),
+            challenges_show: Default::default(),
         }
     }
 
@@ -128,6 +141,7 @@ impl App {
     pub fn open(&mut self, tab: Option<&str>, select: Option<&str>) {
         match tab {
             Some("history") => self.tab = Tab::History,
+            Some("challenges") => self.tab = Tab::Challenges,
             Some("settings") => self.tab = Tab::Settings,
             _ => {}
         }
@@ -139,6 +153,7 @@ impl App {
         match tab.as_str() {
             "settings" => self.tab = Tab::Settings,
             "history" => self.tab = Tab::History,
+            "challenges" => self.tab = Tab::Challenges,
             "changes" => self.tab = Tab::Changes,
             "champions" => self.tab = Tab::Champions,
             "augments" => self.tab = Tab::Augments,
@@ -234,7 +249,7 @@ impl App {
                 ScrollArea::horizontal().id_salt("navigation").show(ui,|ui| {
                     ui.horizontal(|ui| {
                         for (tab,label) in [(Tab::ChampSelect,"Champ Select"),(Tab::Champions,"Champions"),(Tab::Augments,"Augments"),
-                            (Tab::History,"History"),(Tab::Changes,"Patch Changes"),(Tab::Settings,"Settings")] {
+                            (Tab::History,"History"),(Tab::Challenges,"Challenges"),(Tab::Changes,"Patch Changes"),(Tab::Settings,"Settings")] {
                             let on=self.tab==tab;
                             let resp=ui.add(egui::Button::new(RichText::new(label).font(semi(14.5)).color(if on {TEXT} else {DIM})).frame(false).min_size(vec2(0.0,32.0)));
                             if on {let r=resp.rect;ui.painter().rect_filled(Rect::from_min_max(pos2(r.left(),r.bottom()-3.0),r.right_bottom()),1.5,ACCENT);}
@@ -247,7 +262,7 @@ impl App {
     }
 
     fn tab_settings(&mut self, ctx: &egui::Context) {
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(ctx, |ui| page_scroll(ui, "settings-page", |ui| {
             ui.heading("Settings");
             ui.add_space(12.0);
             let mut keep_open = !self.cfg.close_companion_in_game;
@@ -266,6 +281,34 @@ impl App {
             ui.label("Checks on startup and every 6 hours. Verified updates install after quitting from the tray and reopening.");
             changed |= ui.checkbox(&mut self.cfg.auto_update_data, "Automatically refresh ARAM data").changed();
             ui.label(format!("Data refreshes every {} hours while the app is open; cached data remains available offline.", self.cfg.cache_hours));
+            ui.separator();
+            changed |= ui.checkbox(&mut self.cfg.save_diagnostics, "Save a screenshot whenever augment badges appear").changed();
+            ui.label(format!(
+                "For reporting badges that show up at the wrong time or place. Each screenshot is your whole screen (chat and player names included) with notes on what the app read. They stay on this PC, nothing is sent, and only the newest {} are kept.",
+                crate::diagnostics::MAX_CAPTURES
+            ));
+            ui.label(format!(
+                "Press {} in a game to save one of the current moment, for example when cards are up and no badges show. That works with the option off, and a sound confirms it.",
+                self.cfg.capture_hotkey
+            ));
+            let (shots, bytes) = crate::diagnostics::usage();
+            ui.horizontal(|ui| {
+                if ui.button("Create zip to send").clicked() {
+                    self.settings_status = match crate::diagnostics::zip() {
+                        Ok((path, n)) => {
+                            let _ = std::process::Command::new("explorer").arg(format!("/select,{}", path.display())).spawn();
+                            format!("Saved {n} screenshots and the log to {}", path.display())
+                        }
+                        Err(e) => format!("Couldn't create the zip: {e}"),
+                    };
+                }
+                if ui.add_enabled(shots > 0, egui::Button::new("Delete screenshots")).clicked() {
+                    crate::diagnostics::clear();
+                    self.settings_status = "Diagnostic screenshots deleted".into();
+                }
+                ui.label(RichText::new(format!("{shots} saved · {:.1} MB", bytes as f64 / 1e6)).color(DIM));
+            });
+            ui.separator();
             if changed {
                 match self.cfg.save() {
                     Ok(()) => {
@@ -287,7 +330,7 @@ impl App {
             ui.label(format!("App version {}", env!("CARGO_PKG_VERSION")));
             ui.label(&self.shared.read().unwrap().update_status);
             if let Some(e) = self.data.load_error("refresh") { ui.colored_label(BAD, e); }
-        });
+        }));
     }
 
     // ------------------------------------------------------------------ champion rows
@@ -1097,6 +1140,7 @@ impl eframe::App for App {
             self.top_bar(ctx, None);
             match self.tab {
                 Tab::History => self.tab_history(ctx, None),
+                Tab::Challenges => self.tab_challenges(ctx, None),
                 Tab::Settings => self.tab_settings(ctx),
                 _ => {
                     egui::CentralPanel::default().show(ctx, |ui| {
@@ -1125,6 +1169,7 @@ impl eframe::App for App {
             Tab::Augments => self.tab_augments(ctx, &meta),
             Tab::Settings => self.tab_settings(ctx),
             Tab::History => self.tab_history(ctx, Some(&meta)),
+            Tab::Challenges => self.tab_challenges(ctx, Some(&meta)),
             Tab::Changes => self.tab_changes(ctx, &meta),
         }
     }

@@ -3,7 +3,7 @@ impl App {
     pub(super) fn tab_changes(&mut self, ctx: &egui::Context, meta: &Meta) {
         let changes = &meta.patch_changes;
         egui::CentralPanel::default().show(ctx,|ui| {
-            ScrollArea::vertical().id_salt("patch-changes").show(ui,|ui| {
+            page_scroll(ui,"patch-changes",|ui| {
                 ui.heading("Patch changes");
                 if changes.current_patch.is_empty() || changes.baseline_patch.is_empty() {
                     ui.label("Patch comparison data is not available in this dataset yet."); return;

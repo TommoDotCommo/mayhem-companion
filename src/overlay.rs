@@ -911,6 +911,7 @@ unsafe fn run(cfg: Config, rx: Receiver<OverlayCmd>, tid: Arc<AtomicU32>, relics
         (1, cfg.panel_hotkey.clone()),
         (2, cfg.companion_hotkey.clone()),
         (3, cfg.quit_hotkey.clone()),
+        (4, cfg.capture_hotkey.clone()),
     ];
     let relic_keys: Vec<(i32, String)> =
         cfg.relic_hotkeys.iter().take(4).enumerate().map(|(i, k)| (11 + i as i32, k.clone())).collect();
@@ -957,6 +958,7 @@ unsafe fn run(cfg: Config, rx: Receiver<OverlayCmd>, tid: Arc<AtomicU32>, relics
                 1 => ov.handle(OverlayCmd::PanelVisible(None)),
                 2 => toggle_companion(),
                 3 => quit(),
+                4 => crate::diagnostics::REQUESTED.store(true, Ordering::Relaxed),
                 id @ 11..=14 => ov.mark_relic(id - 11),
                 _ => {}
             },
