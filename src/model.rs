@@ -267,7 +267,7 @@ pub struct Cluster {
 /// augment-stats.json: champion id -> rarity -> augment stats (for "best champions" lookups).
 pub type AugStatsFile = HashMap<String, HashMap<String, Vec<AugStat>>>;
 
-/// Data Dragon item.json "data" entries (only what build detection needs).
+/// Data Dragon item.json "data" entries (only what build detection and buy orders need).
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct DdItem {
@@ -275,6 +275,8 @@ pub struct DdItem {
     pub tags: Vec<String>,
     pub gold: DdGold,
     pub stats: HashMap<String, f64>,
+    /// Recipe: the items this one is built from.
+    pub from: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]

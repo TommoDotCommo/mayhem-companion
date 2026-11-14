@@ -18,7 +18,7 @@ pub enum Msg {
     Ui(UiCmd),
 }
 
-use crate::item_sets::{make_item_sets, merge_item_sets};
+use crate::item_sets::{make_item_sets, merge_item_sets, remove_tool_files};
 
 pub struct Engine {
     cfg: Config,
@@ -370,7 +370,14 @@ impl Engine {
         let Some(lcu) = &self.lcu else { return };
         let mut notes: Vec<String> = vec![];
         if self.cfg.import_item_set {
-            let sets = make_item_sets(meta, detail, cid, prefer_cluster, self.cfg.combined_item_sets);
+            if self.cfg.replace_tool_builds {
+                let alias = meta.champs.get(&cid.to_string()).map(|c| c.alias.as_str()).unwrap_or("");
+                for title in remove_tool_files(std::path::Path::new(&self.cfg.league_dir), alias) {
+                    log::info!("removed leftover tool build file: {title}");
+                }
+            }
+            let recipes = self.data.items().ok();
+            let sets = make_item_sets(meta, detail, cid, prefer_cluster, self.cfg.combined_item_sets, recipes.as_deref(), self.cfg.starting_gold);
             let ok = !sets.is_empty() && import_item_sets(lcu, &sets, cid, self.cfg.replace_tool_builds);
             notes.push(if !ok {
                 "item sets ✗".to_string()

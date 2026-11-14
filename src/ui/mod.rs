@@ -269,6 +269,8 @@ impl App {
             let mut changed = ui.checkbox(&mut keep_open, "Keep companion open while playing").changed();
             self.cfg.close_companion_in_game = !keep_open;
             changed |= ui.checkbox(&mut self.cfg.open_companion_in_champ_select, "Open companion in champion select").changed();
+            changed |= ui.checkbox(&mut self.cfg.show_champion_challenges, "Show champion challenges on my pick and bench in champion select").changed();
+            ui.label("One dot per challenge that counts champions one by one (S- in ARAM, mastery): filled when done on that champion. Hover a champion for details.");
             ui.separator();
             changed |= ui.checkbox(&mut self.cfg.import_item_set, "Automatically import item builds").changed();
             changed |= ui.checkbox(&mut self.cfg.replace_tool_builds, "Replace other tools' builds for my current champion").changed();
@@ -337,6 +339,12 @@ impl App {
 
     /// A clickable row: icon, name, tier pill, win rate, optional extra on the right.
     fn champ_row(&mut self, ui: &mut Ui, meta: &Meta, cid: u32, h: f32, selected: bool, extra: Option<(String, Color32)>) -> egui::Response {
+        self.champ_row_with(ui, meta, cid, h, selected, extra, false).0
+    }
+
+    /// `pips` adds the champion-challenge dots under the name; their hover text comes back with the row.
+    #[allow(clippy::too_many_arguments)]
+    fn champ_row_with(&mut self, ui: &mut Ui, meta: &Meta, cid: u32, h: f32, selected: bool, extra: Option<(String, Color32)>, pips: bool) -> (egui::Response, Option<String>) {
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::click());
         if selected || resp.hovered() {
             ui.painter().rect_filled(rect, Rounding::same(6.0), if selected { CARD_HI } else { CARD });
@@ -347,7 +355,9 @@ impl App {
         let icon_rect = Rect::from_min_size(pos2(rect.left() + 6.0, rect.center().y - size / 2.0), vec2(size, size));
         let tex = self.tex(ui.ctx(), &info.image);
         paint_icon(ui, icon_rect, tex, 6.0);
-        text_at(ui, pos2(icon_rect.right() + 10.0, rect.center().y), Align2::LEFT_CENTER, &info.name_en, semi(14.5), TEXT);
+        let tip = if pips { self.champion_pips(ui, pos2(icon_rect.right() + 10.0, rect.center().y + 11.0), cid) } else { None };
+        let name_y = rect.center().y - if tip.is_some() { 6.0 } else { 0.0 };
+        text_at(ui, pos2(icon_rect.right() + 10.0, name_y), Align2::LEFT_CENTER, &info.name_en, semi(14.5), TEXT);
         let mut x = rect.right() - 8.0;
         if let Some((t, c)) = extra {
             let r = text_at(ui, pos2(x, rect.center().y), Align2::RIGHT_CENTER, &t, semi(13.0), c);
@@ -356,7 +366,7 @@ impl App {
         let r = text_at(ui, pos2(x, rect.center().y), Align2::RIGHT_CENTER, &pct(rating.wr), reg(13.0), DIM);
         let pill_w = 30.0;
         tier_pill_at(ui, pos2(r.left() - 10.0 - pill_w, rect.center().y), rating.tier, 13.0);
-        resp
+        (resp, tip)
     }
 
     // ------------------------------------------------------------------ champion detail
@@ -818,7 +828,10 @@ impl App {
         ui.label(RichText::new("YOUR PICK").font(bold(12.0)).color(DIM));
         ui.add_space(4.0);
         if cs.my_champ > 0 {
-            self.champ_row(ui, meta, cs.my_champ, 56.0, true, None);
+            let (resp, tip) = self.champ_row_with(ui, meta, cs.my_champ, 56.0, true, None, true);
+            if let Some(tip) = tip {
+                resp.on_hover_text(tip);
+            }
         }
         if let Some(n) = cs.rerolls {
             ui.add_space(4.0);
@@ -838,15 +851,16 @@ impl App {
                     (Some(r),Some(m)) => {let delta=r.score-m.score;Some((format!("{delta:+.1} fit"),if delta>=0.0 {GOOD} else {BAD}))},
                     _ => None,
                 };
-                let resp=self.champ_row(ui,meta,cid,46.0,false,extra);
+                let (resp,tip)=self.champ_row_with(ui,meta,cid,46.0,false,extra,true);
                 let explanation=recommendation.as_ref().map(|r|format!("Team recommendation score: {:.1} points\nChampion strength: {:+.1} · Pairings: {:+.1} · Team roles: {:+.1}\n{}\n\nHeuristic points, not a predicted win rate. Click to swap.",r.score,r.base,r.synergy,r.composition,r.reasons.join("\n")))
                     .unwrap_or_else(||"No current statistics for this champion. Click to swap.".into());
+                let explanation=match tip {Some(tip)=>format!("{explanation}\n\n{tip}"),None=>explanation};
                 if resp.on_hover_text(explanation).clicked() {let _=self.tx.send(Msg::Ui(UiCmd::SwapBench(cid)));}
                 if index==0 && recommendation.as_ref().zip(mine.as_ref()).is_some_and(|(r,m)|r.score>m.score) {
                     ui.label(RichText::new("Best available team fit").font(reg(11.5)).color(GOOD));
                 }
             }
-            ui.label(RichText::new("Ordered by champion strength, pairings and team needs. ± fit compares recommendation points with your pick; WR is the champion average. Hover for reasons.").font(reg(11.5)).color(FAINT));
+            ui.label(RichText::new("Ordered by champion strength, pairings and team needs. ± fit compares recommendation points with your pick; WR is the champion average. Dots are champion challenges (filled = done on that champion). Hover for reasons and details.").font(reg(11.5)).color(FAINT));
         }
         if !cs.teammates.is_empty() {
             ui.add_space(14.0);

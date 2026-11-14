@@ -106,6 +106,17 @@ impl Snapshot {
     pub fn children(&self, id: u64) -> impl Iterator<Item = &Challenge> {
         self.challenges.iter().filter(move |c| c.parent == id && c.id != id)
     }
+    /// The one-per-champion challenges this champion counts toward and whether each is already
+    /// done on it: the ARAM ones first, then mastery. Class challenges only list their own champions.
+    pub fn for_champion(&self, cid: u32) -> Vec<(&Challenge, bool)> {
+        self.challenges
+            .iter()
+            .chain(&self.other_aram)
+            .chain(&self.any_mode)
+            .filter(|c| c.per_champion() && !c.capstone && (c.available_ids.is_empty() || c.available_ids.contains(&cid)))
+            .map(|c| (c, c.completed_ids.contains(&cid)))
+            .collect()
+    }
     /// Every title in the tree with the challenge that awards it.
     pub fn titles(&self) -> Vec<(&Challenge, &Title)> {
         self.challenges.iter().flat_map(|c| c.titles.iter().map(move |t| (c, t))).collect()
@@ -304,6 +315,26 @@ mod tests {
         assert_eq!(limited.champions([1, 2, 3].into_iter()).1, vec![5]);
     }
 
+    #[test]
+    fn champion_challenges_cover_every_section_and_respect_class_lists() {
+        let c = |id: u64, kind: &str, done: &[u32], only: &[u32]| Challenge {
+            id,
+            id_list_type: kind.into(),
+            completed_ids: done.to_vec(),
+            available_ids: only.to_vec(),
+            ..Default::default()
+        };
+        let snap = Snapshot {
+            challenges: vec![c(1, "CHAMPION", &[7], &[]), c(2, "NONE", &[], &[])],
+            other_aram: vec![c(3, "CHAMPION", &[], &[])],
+            any_mode: vec![c(4, "CHAMPION", &[7], &[7, 8]), c(5, "CHAMPION", &[], &[9])],
+            ..Default::default()
+        };
+        let rows = |cid| snap.for_champion(cid).into_iter().map(|(c, done)| (c.id, done)).collect::<Vec<_>>();
+        assert_eq!(rows(7), vec![(1, true), (3, false), (4, true)]);
+        assert_eq!(rows(8), vec![(1, false), (3, false), (4, false)]);
+        assert_eq!(rows(9), vec![(1, false), (3, false), (5, false)]);
+    }
     #[test]
     fn missing_tree_is_an_error_and_sync_saves_per_account() {
         assert!(parse(&json!({}), &Value::Null, 0).is_err());

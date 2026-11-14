@@ -1,6 +1,6 @@
 [package]
 name = "mayhem-companion"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 description = "Unofficial companion for League of Legends ARAM: Mayhem: live augment tiers on the pick cards, heal relic timers, champ select helper, build browser"
 license = "MIT"

@@ -37,11 +37,15 @@ pub struct Config {
     pub capture_hotkey: String,
     pub import_item_set: bool,
     pub combined_item_sets: bool,
+    /// Gold you spawn with, for the item sets' "Start" row (ARAM gives 1400).
+    pub starting_gold: f64,
     pub replace_tool_builds: bool,
     pub auto_update_app: bool,
     pub auto_update_data: bool,
     pub set_summoner_spells: bool,
     pub open_companion_in_champ_select: bool,
+    /// Dots on your pick and bench in champ select: the one-per-champion challenges done on each.
+    pub show_champion_challenges: bool,
     pub close_companion_in_game: bool,
     pub mayhem_queue_ids: Vec<i64>,
     /// Augment tiers: gain over the champion's average (after smoothing).
@@ -92,11 +96,13 @@ impl Default for Config {
             capture_hotkey: "F9".into(),
             import_item_set: true,
             combined_item_sets: false,
+            starting_gold: 1400.0,
             replace_tool_builds: true,
             auto_update_app: true,
             auto_update_data: true,
             set_summoner_spells: true,
             open_companion_in_champ_select: true,
+            show_champion_challenges: true,
             close_companion_in_game: true,
             mayhem_queue_ids: vec![2400],
             tier_cutoffs: Cutoffs {

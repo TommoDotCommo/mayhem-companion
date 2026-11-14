@@ -289,7 +289,62 @@ fn title_chips(ui: &mut Ui, snap: &Snapshot) {
     });
 }
 
+/// Hover text for a champion's dots: what is still to do on it, then what is done.
+fn champion_tip(rows: &[(&Challenge, bool)]) -> String {
+    let done = rows.iter().filter(|(_, d)| *d).count();
+    let mut out = format!("Champion challenges: {done} of {} done on this champion", rows.len());
+    for (title, want) in [("Still to do", false), ("Done", true)] {
+        let mut part = rows.iter().filter(|(_, d)| *d == want).peekable();
+        if part.peek().is_some() {
+            out += &format!("\n\n{title}");
+        }
+        for (c, _) in part {
+            let (progress, next) = progress_text(c);
+            out += &format!("\n{}: {} ({progress} {next})", c.name, c.description);
+        }
+    }
+    out
+}
+
 impl App {
+    /// Load the saved challenge progress for the current account when it has changed.
+    pub(super) fn load_challenges(&mut self) {
+        let (account, revision) = {
+            let s = self.shared.read().unwrap();
+            (s.history_account.clone(), s.history_revision)
+        };
+        let dir = crate::config::data_dir().join("history");
+        let account = if account.is_empty() { crate::history::last_account(&dir).unwrap_or_default() } else { account };
+        if self.challenges_key != (account.clone(), revision) {
+            self.challenges_key = (account.clone(), revision);
+            self.challenges = if account.is_empty() { None } else { challenges::load(&dir, &account) };
+        }
+    }
+
+    /// One dot per champion challenge this champion counts toward, starting at `pos` (left
+    /// centre): filled when done on it, hollow when not. Returns the hover text, or None
+    /// when the option is off or there is nothing to show.
+    pub(super) fn champion_pips(&mut self, ui: &Ui, pos: egui::Pos2, cid: u32) -> Option<String> {
+        if !self.cfg.show_champion_challenges {
+            return None;
+        }
+        self.load_challenges();
+        let snap = self.challenges.as_ref()?;
+        let rows = snap.for_champion(cid);
+        if rows.is_empty() {
+            return None;
+        }
+        for (i, (_, done)) in rows.iter().enumerate() {
+            let centre = pos2(pos.x + 3.5 + i as f32 * 10.0, pos.y);
+            if *done {
+                ui.painter().circle_filled(centre, 3.5, GOOD);
+            } else {
+                ui.painter().circle_stroke(centre, 3.0, Stroke::new(1.0_f32, DIM));
+            }
+        }
+        Some(champion_tip(&rows))
+    }
+
     /// A challenge row; one-per-champion challenges open to show the champions done and left.
     fn challenge_entry(&mut self, ui: &mut Ui, meta: Option<&Meta>, c: &Challenge) {
         if !c.per_champion() {
@@ -309,16 +364,8 @@ impl App {
     }
 
     pub(super) fn tab_challenges(&mut self, ctx: &egui::Context, meta: Option<&Meta>) {
-        let (account, revision, client) = {
-            let s = self.shared.read().unwrap();
-            (s.history_account.clone(), s.history_revision, s.client)
-        };
-        let dir = crate::config::data_dir().join("history");
-        let account = if account.is_empty() { crate::history::last_account(&dir).unwrap_or_default() } else { account };
-        if self.challenges_key != (account.clone(), revision) {
-            self.challenges_key = (account.clone(), revision);
-            self.challenges = if account.is_empty() { None } else { challenges::load(&dir, &account) };
-        }
+        let client = self.shared.read().unwrap().client;
+        self.load_challenges();
         egui::CentralPanel::default().show(ctx, |ui| {
             page_scroll(ui, "challenges-page", |ui| {
                 ui.heading("Challenges");
